@@ -26,8 +26,6 @@ def construct_event(project_id, message, continue_url):
 
     Returns:
         Event
-
-
     """
     return Event(project_id=project_id,
                  message=message,

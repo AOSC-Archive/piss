@@ -30,7 +30,6 @@ class FeedChore(Chore):
     def fetch(self):
         """Fetches feed and filter out new entries using feedparser.
         """
-        raise KeyboardInterrupt
         last_result = self.last_result
         messages = []  # Event messages to be added to this list.
 

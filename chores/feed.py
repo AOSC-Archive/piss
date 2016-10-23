@@ -23,8 +23,8 @@ class FeedChore(Chore):
         """
         self.identifier = identifier
         self.name = name
-        self.feed_url = params['feed_url']
-        self.result_element = params['result_element']
+        self.feed_url = params.setdefault('feed_url', '')
+        self.result_element = params.setdefault('result_element', 'title')
         self.last_result = last_result
 
     def fetch(self):

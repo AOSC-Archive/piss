@@ -50,12 +50,12 @@ CREATE TABLE IF NOT EXISTS package_upstream (
 );
 CREATE TABLE IF NOT EXISTS upstream_update (
     upstream TEXT,
-    type TEXT, -- commit, issue, pr, tag, release, news
+    category TEXT, -- commit, issue, pr, tag, release, news
     time INTEGER,
     subscription INTEGER,
     title TEXT,
     content TEXT,
-    link TEXT UNIQUE,
+    url TEXT UNIQUE,
     FOREIGN KEY(upstream) REFERENCES upstreams(name),
     FOREIGN KEY(subscription) REFERENCES upstream_subscription(id)
 );
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS upstream_subscription (
     id INTEGER PRIMARY KEY,
     upstream TEXT,
     type TEXT, -- feed, email
-    update_type TEXT, -- all, upstream_update.type
+    category TEXT, -- all, upstream_update.category
     url TEXT,
     last_update INTEGER,
     FOREIGN KEY(upstream) REFERENCES upstreams(name)

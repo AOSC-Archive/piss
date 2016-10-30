@@ -10,8 +10,9 @@ from sqlalchemy.orm import sessionmaker
 
 from models import Base, Event, Chore
 from chores.feed import FeedChore
+from chores.imap import IMAPChore
 
-CHORE_MAP = {'FeedChore': FeedChore}
+CHORE_MAP = {'FeedChore': FeedChore, 'IMAPChore': IMAPChore}
 
 
 def construct_event(project_id, message, continue_url):

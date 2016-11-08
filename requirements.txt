@@ -1,2 +1,6 @@
+requests
 feedparser
 ftputil
+beautifulsoup4
+PyYAML
+feedgen

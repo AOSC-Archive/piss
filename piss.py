@@ -6,10 +6,13 @@ import time
 import sqlite3
 import logging
 
-import upstreamchecker
+import yaml
+
+import chores
 
 logging.basicConfig(
     format='%(asctime)s %(levelname).1s %(message)s', level=logging.INFO)
+logging.captureWarnings(True)
 
 formattime = lambda timestamp: time.strftime('%Y-%m-%d %H:%M', time.localtime(timestamp))
 
@@ -17,72 +20,43 @@ db = sqlite3.connect(sys.argv[1])
 cur = db.cursor()
 
 def init_db(cur):
-    cur.execute('CREATE TABLE IF NOT EXISTS package_version ('
-        'package TEXT,'
-        'source TEXT,' # upstream, abbs, deb
-        'arch TEXT,'
-        'version TEXT,'
-        'FOREIGN KEY(package) REFERENCES packages(name)'
-    ')')
-    cur.execute('CREATE TABLE IF NOT EXISTS upstreams ('
+    cur.execute('CREATE TABLE IF NOT EXISTS chore_status ('
         'name TEXT PRIMARY KEY,'
-        'type TEXT,'
-        'url TEXT,'
-        'branch TEXT,'
-        'FOREIGN KEY(package) REFERENCES packages(name)'
+        'updated INTEGER,'
+        'last_result TEXT'
     ')')
-    cur.execute('CREATE TABLE IF NOT EXISTS package_upstream ('
-        'package TEXT PRIMARY KEY,'
-        'upstream TEXT,'
-        'FOREIGN KEY(package) REFERENCES packages(name),'
-        'FOREIGN KEY(upstream) REFERENCES upstreams(name)'
-    ')')
-    cur.execute('CREATE TABLE IF NOT EXISTS upstream_update ('
-        'upstream TEXT,'
+    cur.execute('CREATE TABLE IF NOT EXISTS events ('
+        'id INTEGER PRIMARY KEY,'
+        'chore TEXT,'
         'category TEXT,' # commit, issue, pr, tag, release, news
         'time INTEGER,'
-        'subscription INTEGER,'
         'title TEXT,'
         'content TEXT,'
-        'url TEXT UNIQUE,'
-        'FOREIGN KEY(upstream) REFERENCES upstreams(name),'
-        'FOREIGN KEY(subscription) REFERENCES upstream_subscription(id)'
-    ')')
-    cur.execute('CREATE TABLE IF NOT EXISTS upstream_subscription ('
-        'id INTEGER PRIMARY KEY,'
-        'upstream TEXT,'
-        'type TEXT,' # feed, email
-        'category TEXT,' # all, upstream_update.category
-        'url TEXT,'
-        'last_update INTEGER,'
-        'FOREIGN KEY(upstream) REFERENCES upstreams(name)'
-    ')')
-    cur.execute('CREATE TABLE IF NOT EXISTS pakreq ('
-        'package TEXT PRIMARY KEY,'
-        'description TEXT,'
-        'url TEXT,'
-        'resolution TEXT'
+        'url TEXT'
     ')')
 
-def upstream_import(cur):
-    srcs = cur.execute("SELECT DISTINCT package, value FROM package_spec WHERE key like '%SRC%' AND package NOT IN (SELECT package FROM upstream_subscription)").fetchall()
+def auto_generate_config(abbs_db, bookmarks_html):
+    db_abbs = sqlite3.connect(abbs_db)
+    cur_abbs = db.cursor()
+    srcs = cur_abbs.execute("SELECT DISTINCT package, value FROM package_spec WHERE key like '%SRC%' AND package NOT IN (SELECT package FROM upstream_subscription)").fetchall()
 
-print('Detecting upstreams...')
-upstreams = list(filter(None, (upstreamchecker.detect_upstream(name, url) for name, url in srcs)))
-updates = []
+    print('Detecting upstreams...')
+    upstreams = list(filter(None, (chores.detect_upstream(name, url) for name, url in srcs)))
 
-print('Getting updates...')
+def run_update():
+    print('Getting updates...')
+    updates = []
+    try:
+        for u in upstreams:
+            updates.extend(u.get_updates())
+    except KeyboardInterrupt:
+        pass
 
-try:
-    for u in upstreams:
-        updates.extend(u.get_updates())
-        #print(u.name)
-        #upd = u.get_updates()
-        #upd.sort(key=lambda x: x.time)
-except KeyboardInterrupt:
-    pass
+def format_events(events):
+    updates.sort(key=lambda x: x.time)
+    for news in updates[-10:]:
+        print("%s \x1b[1;32m%s \x1b[1;39m%s\x1b[0m \t%s" % (formattime(news.time), news.category, news.upstream, news.title))
 
-updates.sort(key=lambda x: x.time)
+def generate_feed(cur, output):
+    ...
 
-for news in updates[-10:]:
-    print("%s \x1b[1;32m%s \x1b[1;39m%s\x1b[0m \t%s" % (formattime(news.time), news.category, news.upstream, news.title))

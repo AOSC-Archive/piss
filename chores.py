@@ -6,6 +6,8 @@ import re
 import time
 import json
 import difflib
+import logging
+import sqlite3
 import calendar
 import warnings
 import collections
@@ -21,6 +23,7 @@ __version__ = '0.1'
 USER_AGENT = 'Mozilla/5.0 (compatible; PISS/%s; +https://github.com/AOSC-Dev/piss)' % __version__
 
 RE_FEED = re.compile("atom|rss|feed", re.I)
+RE_GITHUB = re.compile("github.com", re.I)
 
 ChoreType = collections.namedtuple('ChoreType', ('name', 'chore', 'kwargs'))
 ChoreStatus = collections.namedtuple('ChoreStatus', ('updated', 'last_result'))
@@ -38,6 +41,14 @@ Event = collections.namedtuple('Event', (
 
 HSESSION = requests.Session()
 HSESSION.headers['User-Agent'] = USER_AGENT
+
+def uniq(seq, key=None): # Dave Kirby
+    # Order preserving
+    seen = set()
+    if key:
+        return [x for x in seq if key(x) not in seen and not seen.add(key(x))]
+    else:
+        return [x for x in seq if x not in seen and not seen.add(x)]
 
 class ExtendedChoreStatus(ChoreStatus):
     def load(self):
@@ -102,15 +113,17 @@ class FeedChore(Chore):
             return cls(name, url)
 
 class GitHubChore(Chore):
-    def __init__(self, name, repo, category='release', status=None):
+    def __init__(self, name, repo, category='release', branch=None, status=None):
         self.name = name
         self.repo = repo
+        self.branch = branch
         self.category = category
         self.status = status or STATUS_NONE
 
     def dump(self):
         return ChoreType(self.name, 'github', {
             'repo': self.repo,
+            'branch': self.branch,
             'category': self.category
         })
 
@@ -119,6 +132,9 @@ class GitHubChore(Chore):
             url = 'https://github.com/%s/releases.atom' % self.repo
         elif self.category == 'tag':
             url = 'https://github.com/%s/tags.atom' % self.repo
+        elif self.category == 'commit':
+            url = 'https://github.com/%s/commits/%s.atom' % \
+                    (self.repo, self.branch or 'master')
         else:
             raise ValueError('unknown category: %s' % self.category)
         feed = feedparser.parse(url, etag=self.status.last_result)
@@ -133,21 +149,22 @@ class GitHubChore(Chore):
         urlp = urllib.parse.urlparse(url)
         assert urlp.netloc == 'github.com'
         pathseg = urlp.path.lstrip('/').split('/')
+        if pathseg[0] == 'downloads':
+            pathseg.pop(0)
         repo = '/'.join(pathseg[:2])
+        if repo.endswith('.git'):
+            repo = repo[:-4]
         if len(pathseg) > 2:
             if pathseg[2] == 'releases':
                 return cls(name, repo, 'release')
             elif pathseg[2] == 'tags':
-                return cls(name, repo, 'release')
+                return cls(name, repo, 'tag')
             elif pathseg[2] == 'commits':
-                return FeedChore(
-                    name,
-                    'https://github.com/%s/commits/%s.atom' % (repo, pathseg[3]),
-                    'commit'
-                )
+                return cls(name, repo, 'commit', pathseg[3])
         for category, url in (
             ('release', 'https://github.com/%s/releases.atom' % repo),
-            ('tag', 'https://github.com/%s/tags.atom' % repo)):
+            ('tag', 'https://github.com/%s/tags.atom' % repo),
+            ('commit', 'https://github.com/%s/commits/master.atom' % repo)):
             feed = feedparser.parse(url)
             if feed.entries:
                 return cls(name, repo, category)
@@ -168,7 +185,7 @@ class HTMLSelectorChore(Chore):
         return ChoreType(self.name, 'html', {
             'url': self.url,
             'selector': self.selector,
-            'regex': self.regex.pattern,
+            'regex': self.regex and self.regex.pattern,
             'category': self.category
         })
 
@@ -254,14 +271,33 @@ class FTPChore(Chore):
         yield Event(self.name, self.category,
                     time.time(), title, content, self.url)
 
-    @classmethod
-    def detect(cls, name, url):
-        urlp = urllib.parse.urlparse(url)
-        if urlp.scheme == 'ftp':
-            newurlp = list(urlp)
-            if urlp.path[-1] != '/':
-                newurlp[2] = os.path.dirname(urlp.path)
-            return cls(name, urllib.parse.urlunparse(newurlp))
+class IMAPChore(Chore):
+    def __init__(self, name, host, username, password, folder, subject_regex='.*', from_regex='.*', body_regex='.*', category=None, status=None):
+        self.name = name
+        self.host = host
+        self.username = username
+        self.password = password
+        self.folder = folder
+        self.subject_regex = re.compile(subject_regex)
+        self.from_regex = re.compile(from_regex)
+        self.body_regex = re.compile(body_regex)
+        self.category = category
+        self.status = status or STATUS_NONE
+
+    def dump(self):
+        return ChoreType(self.name, 'imap', {
+            'host': self.host,
+            'username': self.username,
+            'password': self.password,
+            'folder': self.folder,
+            'subject_regex': self.subject_regex.pattern,
+            'from_regex': self.from_regex.pattern,
+            'body_regex': self.body_regex.pattern,
+            'category': self.category
+        })
+
+    def fetch(self):
+        raise NotImplementedError
 
 UPSTREAM_HANDLERS = {
     'feed': FeedChore,
@@ -271,27 +307,181 @@ UPSTREAM_HANDLERS = {
     'ftp': FTPChore
 }
 
-def detect_upstream(name, url):
+def remove_package_version(name, url, version):
+    newurlpspl = ['']
+    for s in url.strip('/').split('/'):
+        vercheck = s.replace(name, '').strip(' -_.')
+        if vercheck and (
+            version in vercheck or version.startswith(vercheck)):
+            break
+        else:
+            newurlpspl.append(s)
+    return '/'.join(newurlpspl)
+
+def detect_upstream(name, url, version=None):
     urlp = urllib.parse.urlparse(url)
     if urlp.netloc == 'github.com':
         return UPSTREAM_HANDLERS['github'].detect(name, url)
+    elif urlp.netloc in ('pypi.io', 'pypi.python.org'):
+        try:
+            pkgname = os.path.splitext(os.path.basename(urlp.path))[0].rsplit('-', 1)[0]
+        except Exception:
+            return
+        newurl = 'https://pypi.python.org/simple/%s/' % pkgname
+        logging.debug('New url: ' + newurl)
+        req = HSESSION.get(newurl, timeout=30)
+        if req.status_code == 200:
+            return HTMLSelectorChore(name, newurl, 'a', None, 'file')
+        else:
+            return
     elif urlp.scheme == 'ftp':
-        return UPSTREAM_HANDLERS['ftp'].detect(name, url)
+        newurlp = list(urlp)
+        if urlp.path[-1] != '/':
+            newurlp[2] = os.path.dirname(urlp.path)
+        if version:
+            newurlp[2] = remove_package_version(name, newurlp[2], version)
+        return FTPChore(name, urllib.parse.urlunparse(newurlp))
+    elif urlp.path.rstrip('/').endswith('.git'):
+        return
     elif urlp.scheme in ('http', 'https'):
         newurlp = list(urlp)
         if not urlp.query:
             ext = os.path.splitext(urlp.path)[1]
             if ext in frozenset(('.gz', '.bz2', '.xz', '.tar', '.7z', '.rar', '.zip')):
                 newurlp[2] = os.path.dirname(urlp.path)
+            if version:
+                newurlp[2] = remove_package_version(name, newurlp[2], version)
         newurl = urllib.parse.urlunparse(newurlp)
+        logging.debug('New url: ' + newurl)
         req = HSESSION.get(newurl, timeout=30)
         if req.status_code != 200:
-            return None
+            newurlp[2] = os.path.dirname(newurlp[2])
+            if name in newurlp[2] or name in urlp.hostname:
+                newurl = urllib.parse.urlunparse(newurlp)
+                logging.debug('New url: ' + newurl)
+                req = HSESSION.get(newurl, timeout=30)
+                if req.status_code != 200:
+                    return
+            else:
+                return
+        newurl = req.url
+        if len(req.content) > 1024*1024:
+            logging.warning('Webpage too large: ' + newurl)
+            return
         soup = bs4.BeautifulSoup(req.content, 'html5lib')
-        if soup.title and soup.title.string.lower().startswith('Index of'):
-            return HTMLSelectorChore(name, url, 'a[href]', None, 'file')
+        title = None
+        if soup.title:
+            title = soup.title.string.lower()
+            if title.startswith('index of'):
+                return HTMLSelectorChore(name, newurl, 'a[href]', None, 'file')
         feedlink = soup.find('a', href=RE_FEED)
         if feedlink:
             return FeedChore(
-                name, os.path.join(os.path.dirname(newurl), feedlink['href']))
+                name, urllib.parse.urljoin(os.path.dirname(newurl), feedlink['href']))
+        if title and 'download' in title:
+            return HTMLSelectorChore(name, newurl, 'a[href]', None, 'file')
+        githublink = soup.find('a', href=RE_GITHUB)
+        if githublink:
+            return UPSTREAM_HANDLERS['github'].detect(name, githublink['href'])
     return None
+
+def longest_common_substring(s1, s2):
+    m = [[0] * (1 + len(s2)) for i in range(1 + len(s1))]
+    longest, x_longest = 0, 0
+    for x in range(1, 1 + len(s1)):
+        for y in range(1, 1 + len(s2)):
+            if s1[x - 1] == s2[y - 1]:
+                m[x][y] = m[x - 1][y - 1] + 1
+                if m[x][y] > longest:
+                    longest = m[x][y]
+                    x_longest = x
+            else:
+                m[x][y] = 0
+    return s1[x_longest - longest: x_longest]
+
+URL_FILTERED = frozenset((
+    'https', 'com', 'releases', 'org', 'http', 'www', 'net', 'download', 'html',
+    'sourceforge', 'pypi', 'projects', 'files', 'software', 'pub', 'git',
+    'downloads', 'ftp', 'kernel', 'freedesktop', 'python', 'mozilla', 'cgit',
+    'master', 'commits', 'en-us', 'linux', 'gnu', 'launchpad', 'folder', 'sort',
+    'wiki', 'source', 'debian', 'maxresults', 'place', 'tags', 'pipermail',
+    'sources', 'php', 'navbar', 'io', 'fedorahosted', 'lists', 'archives',
+    'news', 'cgi', ''
+))
+
+RE_IGN = re.compile(r'v?\d+\.\d+|\d+$')
+
+def detect_name(url, title):
+    urlp = urllib.parse.urlparse(url)
+    if urlp.netloc == 'github.com':
+        return urlp.path.strip('/').split('/')[1].lower()
+    else:
+        urlpath = os.path.splitext(urlp.path.strip('/'))[0].lower().split('/')
+        urlkwd = [x for x in urlpath if x not in URL_FILTERED and not RE_IGN.match(x)]
+        titlel = title.lower()
+        candidates = []
+        for k in urlkwd:
+            if k in titlel:
+                candidates.append(k)
+        if candidates:
+            return candidates[-1]
+        else:
+            host = urlp.hostname.split('.')
+            cand2 = [x for x in urlp.hostname.split('.') if x not in URL_FILTERED]
+            if cand2:
+                return cand2[0]
+            else:
+                return host[-2]
+
+def generate_chore_config(abbs_db=None, bookmarks_html=None, existing=None):
+    srcs = collections.OrderedDict()
+    src_ver = {}
+    failed = []
+    if abbs_db:
+        logging.info('Reading database...')
+        db_abbs = sqlite3.connect(abbs_db)
+        cur_abbs = db_abbs.cursor()
+        for pkg, url, ver in uniq(cur_abbs.execute(
+            "SELECT DISTINCT package_spec.package as package, "
+            "package_spec.value as url, packages.version FROM package_spec "
+            "LEFT JOIN packages ON package_spec.package=packages.name "
+            "WHERE key like '%SRC%' AND (value like 'http%' OR value like 'ftp%') "
+            "ORDER BY package ASC"
+        ), key=lambda x: x[1]):
+            srcs[pkg] = url
+            src_ver[pkg] = ver
+        db_abbs.close()
+    if bookmarks_html:
+        logging.info('Reading bookmarks...')
+        soup = bs4.BeautifulSoup(open(bookmarks_html, 'rb').read(), 'lxml')
+        links = soup.find_all('a')
+        for a in links:
+            url = a.get('href')
+            title = a.string.strip()
+            urlp = urllib.parse.urlparse(url)
+            if urlp.scheme in ('http', 'https', 'ftp', 'ftps'):
+                name = detect_name(url, title)
+                srcs[name] = url
+            else:
+                continue
+    chores = existing or collections.OrderedDict()
+    logging.info('Detecting upstreams...')
+    try:
+        for k, v in srcs.items():
+            if k in chores:
+                continue
+            logging.debug('Checking: %s, %s' % (k, v))
+            try:
+                chore = detect_upstream(k, v, src_ver.get(k))
+                if chore:
+                    chore_dump = chore.dump()
+                    chores[k] = {k:v for k,v in chore_dump.kwargs.items() if v}
+                    chores[k]['chore'] = chore_dump.chore
+                else:
+                    failed.append('%s, %s' % (k, v))
+                    logging.warning('Failed to find upstream: %s, %s' % (k, v))
+            except Exception:
+                logging.exception('Error when checking %s, %s' % (k, v))
+    except KeyboardInterrupt:
+        logging.warning('Interrupted.')
+    return chores, failed

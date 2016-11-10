@@ -147,8 +147,8 @@ def format_events(events, out_format, **kwargs):
             fe.published(datetime.datetime.fromtimestamp(news.time, datetime.timezone.utc))
             content = news.content
             if '</' not in news.content:
-                content = markupsafe.Markup('<br/>').join(news.content.splitlines())
-            fe.content(content, None, 'CDATA')
+                content = markupsafe.Markup('<pre>%s</pre>') % markupsafe.Markup('<br/>').join(news.content.splitlines())
+            fe.content(content, None, 'html')
             fe.link({'href': news.url, 'rel': 'alternate'})
         if out_format == 'atom':
             return fg.atom_str(pretty=True).decode('utf-8')

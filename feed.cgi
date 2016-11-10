@@ -14,5 +14,5 @@ echo 'Status: 200 OK'
 echo 'Content-Type: application/atom+xml; charset=utf-8'
 echo
 
-python3 PISS_SCRIPT check -d "$DATABASE" -f atom -t "$TITLE" -s "$SUBTITLE" -i "$ATOM_ID" -l "$ATOM_LINK" -L "$ATOM_LANG" -n "$NUMBER" - 2> /dev/null
+python3 "$PISS_SCRIPT" check -d "$DATABASE" -f atom -t "$TITLE" -s "$SUBTITLE" -i "$ATOM_ID" -l "$ATOM_LINK" -L "$ATOM_LANG" -n "$NUMBER" - 2> /dev/null
 

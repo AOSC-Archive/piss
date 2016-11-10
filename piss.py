@@ -13,6 +13,7 @@ import collections
 import chores
 
 import yaml
+import markupsafe
 import feedgen.feed
 
 logging.basicConfig(
@@ -144,7 +145,10 @@ def format_events(events, out_format, **kwargs):
             fe.title(news.title)
             fe.category({'term': news.category or 'unclassified'})
             fe.published(datetime.datetime.fromtimestamp(news.time, datetime.timezone.utc))
-            fe.content(news.content, None, 'CDATA' if '</' in news.content else None)
+            content = news.content
+            if '</' not in news.content:
+                content = markupsafe.Markup('<br/>').join(news.content.splitlines())
+            fe.content(content, None, 'CDATA')
             fe.link({'href': news.url, 'rel': 'alternate'})
         if out_format == 'atom':
             return fg.atom_str(pretty=True).decode('utf-8')

@@ -4,3 +4,4 @@ ftputil
 beautifulsoup4
 PyYAML
 feedgen
+MarkupSafe

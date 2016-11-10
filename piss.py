@@ -3,14 +3,17 @@
 
 import sys
 import time
+import sched
 import sqlite3
 import logging
 import argparse
+import datetime
 import collections
 
 import chores
 
 import yaml
+import feedgen.feed
 
 logging.basicConfig(
     format='%(asctime)s %(levelname).1s %(message)s', level=logging.DEBUG)
@@ -26,6 +29,7 @@ def setup_yaml():
 def init_db(filename):
     db = sqlite3.connect(filename)
     cur = db.cursor()
+    cur.execute('PRAGMA journal_mode=WAL')
     cur.execute('CREATE TABLE IF NOT EXISTS chore_status ('
         'name TEXT PRIMARY KEY,'
         'updated INTEGER,'
@@ -40,6 +44,7 @@ def init_db(filename):
         'content TEXT,'
         'url TEXT'
     ')')
+    db.commit()
     return db
 
 def generate_config(args):
@@ -53,16 +58,111 @@ def generate_config(args):
         yaml.dump_all((cfg, failed), f, default_flow_style=False)
     logging.info('Done.')
 
+def wrap_fetch(chore, cur):
+    updcount = 0
+    try:
+        for event in chore.fetch():
+            cur.execute('INSERT INTO events '
+                '(chore, category, time, title, content, url) '
+                'VALUES (?,?,?,?,?,?)', event
+            )
+            updcount += 1
+    except Exception:
+        logging.exception('Error when fetching %s', chore.name)
+        return
+    cur.execute(
+        'REPLACE INTO chore_status VALUES (?,?,?)',
+        (chore.name, chore.status.updated, chore.status.last_result)
+    )
+    logging.info('%s got %d updates.', chore.name, updcount)
+
 def run_update(args):
     logging.info('Getting updates...')
-    ...
+    db = init_db(args.db)
+    cur = db.cursor()
+    cfg = next(yaml.safe_load_all(open(args.chores, 'r', encoding='utf-8')))
+    chores_avail = []
+    tasks = sched.scheduler(time.time)
+    for name, config in cfg.items():
+        result = cur.execute('SELECT updated, last_result FROM chore_status WHERE name = ?', (name,)).fetchone()
+        if result:
+            result = chores.ChoreStatus(*result)
+        chorename = config.pop('chore')
+        chore = chores.CHORE_HANDLERS[chorename](name, status=result, **config)
+        chores_avail.append((chorename, chore))
+    try:
+        while 1:
+            for chorename, chore in chores_avail:
+                tasks.enterabs(
+                    chore.status.updated + args.keep,
+                    chores.CHORE_PRIO[chorename],
+                    wrap_fetch, (chore, cur)
+                )
+            tasks.run()
+            db.commit()
+            if not args.keep:
+                break
+    except KeyboardInterrupt:
+        logging.warning('Interrupted.')
+    finally:
+        db.commit()
+
+def get_events(cur, limit=None):
+    if limit:
+        cur.execute('SELECT * FROM events ORDER BY time DESC LIMIT ?', (limit,))
+    else:
+        cur.execute('SELECT * FROM events ORDER BY time DESC')
+    row = cur.fetchone()
+    while row:
+        yield row[0], chores.Event(*row[1:])
+        row = cur.fetchone()
+
+def format_events(events, out_format, **kwargs):
+    txttime = lambda timestamp: time.strftime('%Y-%m-%d %H:%M', time.localtime(timestamp))
+    if out_format in ('term', 'text'):
+        lines = []
+        for k, news in events:
+            if out_format == 'term':
+                lines.append("%s \x1b[1;32m%s \x1b[1;39m%s\x1b[0m \t%s" %
+                    (txttime(news.time), news.category or '', news.chore, news.title))
+            else:
+                lines.append("%s %s %s\t%s" %
+                    (txttime(news.time), news.category or '', news.chore, news.title))
+        lines.reverse()
+        return '\n'.join(lines) + '\n'
+    elif out_format in ('atom', 'rss'):
+        fg = feedgen.feed.FeedGenerator()
+        fg.title(kwargs['title'])
+        fg.subtitle(kwargs['subtitle'])
+        fg.id(kwargs['id'])
+        if kwargs.get('link'):
+            fg.link(href=kwargs['link'], rel='alternate')
+        fg.language('en')
+        for k, news in events:
+            fe = fg.add_entry()
+            fe.id(kwargs['id'] + '/' + str(k))
+            fe.title(news.title)
+            fe.category({'term': news.category or 'unclassified'})
+            fe.published(datetime.datetime.fromtimestamp(news.time, datetime.timezone.utc))
+            fe.content(news.content, None, 'CDATA' if '</' in news.content else None)
+            fe.link({'href': news.url, 'rel': 'alternate'})
+        if out_format == 'atom':
+            return fg.atom_str(pretty=True).decode('utf-8')
+        else:
+            return fg.rss_str(pretty=True).decode('utf-8')
+    else:
+        raise ValueError('unsupported output format: %s' % out_format)
 
 def generate_feed(args):
-    formattime = lambda timestamp: time.strftime('%Y-%m-%d %H:%M', time.localtime(timestamp))
-    # updates.sort(key=lambda x: x.time)
-    # for news in updates[-10:]:
-        # print("%s \x1b[1;32m%s \x1b[1;39m%s\x1b[0m \t%s" % (formattime(news.time), news.category, news.upstream, news.title))
-    ...
+    logging.info('Reading database...')
+    db = init_db(args.db)
+    cur = db.cursor()
+    if args.output == '-':
+        f = sys.stdout
+    else:
+        f = open(args.output, 'w', encoding='utf-8')
+    f.write(format_events(get_events(cur, args.number), args.format, **vars(args)))
+    f.close()
 
 def main():
     parser = argparse.ArgumentParser(description='Projects Information Storage System')
@@ -73,12 +173,21 @@ def main():
     parser_gen.add_argument('-e', '--existing', help='base on this existing config file')
     parser_gen.add_argument('output', nargs='?', default='chores.yaml', help='output YAML file')
     parser_gen.set_defaults(func=generate_config)
-    parser_cron = subparsers.add_parser('update', help='Get updates.')
-    parser_cron.add_argument('-k', '--keep', help='keep running')
+    parser_cron = subparsers.add_parser('run', help='Get updates.')
+    parser_cron.add_argument('-d', '--db', default='piss.db', help='piss database file')
+    parser_cron.add_argument('-c', '--chores', default='chores.yaml', help='chores YAML config file')
+    parser_cron.add_argument('-k', '--keep', type=int, metavar='INTERVAL', default=0, help='keep running, check updates every INTERVAL minutes')
     parser_cron.set_defaults(func=run_update)
     parser_serve = subparsers.add_parser('check', help='Check out the latest news.')
+    parser_serve.add_argument('-d', '--db', default='piss.db', help='piss database file')
     parser_serve.add_argument('-f', '--format', choices=('term', 'text', 'atom', 'rss'), default='term', help='output format')
-    parser_serve.add_argument('output', help='output feed')
+    parser_serve.add_argument('-t', '--title', default='PISS Updates', help='news feed title')
+    parser_serve.add_argument('-s', '--subtitle', default='New packaging tasks', help='news feed subtitle')
+    parser_serve.add_argument('-i', '--id', default='pissnews', help='id for feed formats')
+    parser_serve.add_argument('-l', '--link', help='url for PISS website')
+    parser_serve.add_argument('-L', '--lang', default='en', help='language setting for feed formats')
+    parser_serve.add_argument('-n', '--number', type=int, metavar='NUM', default=100, help='limit max number of events (default: 100, all: 0)')
+    parser_serve.add_argument('output', nargs='?', default='-', help='output feed')
     parser_serve.set_defaults(func=generate_feed)
     args = parser.parse_args()
     args.func(args)

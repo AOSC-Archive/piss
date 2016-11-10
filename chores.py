@@ -28,7 +28,7 @@ RE_GITHUB = re.compile("github.com", re.I)
 ChoreType = collections.namedtuple('ChoreType', ('name', 'chore', 'kwargs'))
 ChoreStatus = collections.namedtuple('ChoreStatus', ('updated', 'last_result'))
 
-STATUS_NONE = ChoreStatus(None, None)
+STATUS_NONE = ChoreStatus(0, None)
 
 Event = collections.namedtuple('Event', (
     'chore',    # Chore name
@@ -60,15 +60,13 @@ class ExtendedChoreStatus(ChoreStatus):
 class Chore:
     def __init__(self, name, status=None, **kwargs):
         self.name = name
+        # should update db after fetch
         self.status = status or STATUS_NONE
         self.kwargs = kwargs
 
     def dump(self):
         # dumper should remove None's from self.kwargs
         return ChoreType(self.name, 'undef', self.kwargs)
-
-    def status(self):
-        return self.status
 
     def fetch(self):
         yield
@@ -98,11 +96,13 @@ class FeedChore(Chore):
 
     def fetch(self):
         feed = feedparser.parse(self.url, etag=self.status.last_result)
+        last_updated = self.status.updated
         self.status = ChoreStatus(int(time.time()), feed.get('etag'))
         for e in feed.entries:
-            yield Event(self.name, self.category,
-                        calendar.timegm(e.updated_parsed), e.title,
-                        e.summary, e.link)
+            evt_time = calendar.timegm(e.updated_parsed)
+            if last_updated and evt_time > last_updated:
+                yield Event(self.name, self.category,
+                            evt_time, e.title, e.summary, e.link)
 
     @classmethod
     def detect(cls, name, url):
@@ -138,11 +138,13 @@ class GitHubChore(Chore):
         else:
             raise ValueError('unknown category: %s' % self.category)
         feed = feedparser.parse(url, etag=self.status.last_result)
+        last_updated = self.status.updated
         self.status = ChoreStatus(int(time.time()), feed.get('etag'))
         for e in feed.entries:
-            yield Event(self.name, self.category,
-                        calendar.timegm(e.updated_parsed), e.title,
-                        e.summary, e.link)
+            evt_time = calendar.timegm(e.updated_parsed)
+            if last_updated and evt_time > last_updated:
+                yield Event(self.name, self.category,
+                            evt_time, e.title, e.summary, e.link)
 
     @classmethod
     def detect(cls, name, url):
@@ -178,9 +180,6 @@ class HTMLSelectorChore(Chore):
         self.category = category
         self.status = ExtendedChoreStatus(*(status or STATUS_NONE))
 
-        self.session = requests.Session()
-        self.session.headers['User-Agent'] = USER_AGENT
-
     def dump(self):
         return ChoreType(self.name, 'html', {
             'url': self.url,
@@ -194,13 +193,14 @@ class HTMLSelectorChore(Chore):
         old_entries = lastupd.get('entries')
         old_etag = lastupd.get('etag')
         if old_etag:
-            req = self.session.get(self.url, headers={'If-None-Match': old_etag},
+            req = HSESSION.get(self.url, headers={'If-None-Match': old_etag},
                     timeout=30)
             if req.status_code == 304:
                 self.status = self.status.save(lastupd)
+                req.close()
                 return
         else:
-            req = self.session.get(self.url, timeout=30)
+            req = HSESSION.get(self.url, timeout=30)
         req.raise_for_status()
         lastupd['etag'] = req.headers.get('etag')
         # html5lib for badly escaped sites
@@ -299,29 +299,39 @@ class IMAPChore(Chore):
     def fetch(self):
         raise NotImplementedError
 
-UPSTREAM_HANDLERS = {
+CHORE_HANDLERS = {
     'feed': FeedChore,
     'github': GitHubChore,
     'html': HTMLSelectorChore,
-    'github': GitHubChore,
+    'imap': IMAPChore,
     'ftp': FTPChore
+}
+
+CHORE_PRIO = {
+    'feed': 10,
+    'github': 9,
+    'html': 4,
+    'imap': 8,
+    'ftp': 5
 }
 
 def remove_package_version(name, url, version):
     newurlpspl = ['']
     for s in url.strip('/').split('/'):
-        vercheck = s.replace(name, '').strip(' -_.')
-        if vercheck and (
+        vercheck = urllib.parse.unquote(s).replace(name, '').strip(' -_.')
+        if len(vercheck) > 1 and (
             version in vercheck or version.startswith(vercheck)):
             break
         else:
             newurlpspl.append(s)
     return '/'.join(newurlpspl)
 
+RE_SF = re.compile('^(/projects/[^/]+)/(.+)$')
+
 def detect_upstream(name, url, version=None):
     urlp = urllib.parse.urlparse(url)
     if urlp.netloc == 'github.com':
-        return UPSTREAM_HANDLERS['github'].detect(name, url)
+        return CHORE_HANDLERS['github'].detect(name, url)
     elif urlp.netloc in ('pypi.io', 'pypi.python.org'):
         try:
             pkgname = os.path.splitext(os.path.basename(urlp.path))[0].rsplit('-', 1)[0]
@@ -349,8 +359,13 @@ def detect_upstream(name, url, version=None):
             ext = os.path.splitext(urlp.path)[1]
             if ext in frozenset(('.gz', '.bz2', '.xz', '.tar', '.7z', '.rar', '.zip')):
                 newurlp[2] = os.path.dirname(urlp.path)
+            if urlp.hostname == 'sourceforge.net' and '/files' not in newurlp[2]:
+                newurlp[2] = RE_SF.sub(r'\1/files/\2', newurlp[2])
             if version:
                 newurlp[2] = remove_package_version(name, newurlp[2], version)
+        elif name in urlp.hostname:
+            newurlp[2] = '/'
+            newurlp[3] = ''
         newurl = urllib.parse.urlunparse(newurlp)
         logging.debug('New url: ' + newurl)
         req = HSESSION.get(newurl, timeout=30)
@@ -382,7 +397,7 @@ def detect_upstream(name, url, version=None):
             return HTMLSelectorChore(name, newurl, 'a[href]', None, 'file')
         githublink = soup.find('a', href=RE_GITHUB)
         if githublink:
-            return UPSTREAM_HANDLERS['github'].detect(name, githublink['href'])
+            return CHORE_HANDLERS['github'].detect(name, githublink['href'])
     return None
 
 def longest_common_substring(s1, s2):
@@ -403,8 +418,8 @@ URL_FILTERED = frozenset((
     'https', 'com', 'releases', 'org', 'http', 'www', 'net', 'download', 'html',
     'sourceforge', 'pypi', 'projects', 'files', 'software', 'pub', 'git',
     'downloads', 'ftp', 'kernel', 'freedesktop', 'python', 'mozilla', 'cgit',
-    'master', 'commits', 'en-us', 'linux', 'gnu', 'launchpad', 'folder', 'sort',
-    'wiki', 'source', 'debian', 'maxresults', 'place', 'tags', 'pipermail',
+    'master', 'commits', 'en-us', 'en', 'linux', 'gnu', 'launchpad', 'folder',
+    'sort', 'wiki', 'source', 'debian', 'maxresults', 'place', 'tags', 'pipermail',
     'sources', 'php', 'navbar', 'io', 'fedorahosted', 'lists', 'archives',
     'news', 'cgi', ''
 ))

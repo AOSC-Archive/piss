@@ -99,7 +99,7 @@ class FeedChore(Chore):
         last_updated = self.status.updated
         self.status = ChoreStatus(int(time.time()), feed.get('etag'))
         for e in feed.entries:
-            evt_time = calendar.timegm(e.updated_parsed)
+            evt_time = int(calendar.timegm(e.updated_parsed))
             if last_updated and evt_time > last_updated:
                 yield Event(self.name, self.category,
                             evt_time, e.title, e.summary, e.link)
@@ -213,7 +213,7 @@ class HTMLSelectorChore(Chore):
         elif self.regex:
             entries = []
             for x in tags:
-                match = self.regex.search(x.get_text())
+                match = self.regex.search(' '.join(x.stripped_strings))
                 if match:
                     entries.append(match.group(bool(self.regex.groups)))
         else:
@@ -230,10 +230,10 @@ class HTMLSelectorChore(Chore):
             title = '%s website changed' % self.name
             for text in diff:
                 if text[0] == '+':
-                    title = '%s: %s' % (self.name, text[1:])
+                    title = '%s: %s' % (self.name, text[1:].replace('\n', ' '))
             content = '\n'.join(diff[2:])
         yield Event(self.name, self.category,
-                    time.time(), title, content, self.url)
+                    int(time.time()), title, content, self.url)
 
 class FTPChore(Chore):
     def __init__(self, name, url, category='file', status=None):
@@ -269,7 +269,7 @@ class FTPChore(Chore):
                     title = '%s: %s' % (self.name, text[1:])
             content = '\n'.join(diff[2:])
         yield Event(self.name, self.category,
-                    time.time(), title, content, self.url)
+                    int(time.time()), title, content, self.url)
 
 class IMAPChore(Chore):
     def __init__(self, name, host, username, password, folder, subject_regex='.*', from_regex='.*', body_regex='.*', category=None, status=None):
@@ -421,7 +421,7 @@ URL_FILTERED = frozenset((
     'master', 'commits', 'en-us', 'en', 'linux', 'gnu', 'launchpad', 'folder',
     'sort', 'wiki', 'source', 'debian', 'maxresults', 'place', 'tags', 'pipermail',
     'sources', 'php', 'navbar', 'io', 'fedorahosted', 'lists', 'archives',
-    'news', 'cgi', ''
+    'news', 'cgi', 'blog', ''
 ))
 
 RE_IGN = re.compile(r'v?\d+\.\d+|\d+$')

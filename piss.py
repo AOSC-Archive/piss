@@ -13,7 +13,6 @@ import collections
 import chores
 
 import yaml
-import markupsafe
 import feedgen.feed
 
 logging.basicConfig(
@@ -131,7 +130,7 @@ def format_events(events, out_format, **kwargs):
                     (txttime(news.time), news.category or '', news.chore, news.title))
         lines.reverse()
         return '\n'.join(lines) + '\n'
-    elif out_format in ('atom', 'rss'):
+    elif out_format == 'atom':
         fg = feedgen.feed.FeedGenerator()
         fg.title(kwargs['title'])
         fg.subtitle(kwargs['subtitle'])
@@ -142,18 +141,13 @@ def format_events(events, out_format, **kwargs):
         for k, news in events:
             fe = fg.add_entry()
             fe.id(kwargs['id'] + '/' + str(k))
-            fe.title(news.title)
+            fe.title('%s: %s' % (news.chore, news.title))
             fe.category({'term': news.category or 'unclassified'})
             fe.published(datetime.datetime.fromtimestamp(news.time, datetime.timezone.utc))
-            content = news.content
-            if '</' not in news.content:
-                content = markupsafe.Markup('<pre>%s</pre>') % markupsafe.Markup('<br/>').join(news.content.splitlines())
-            fe.content(content, None, 'html')
+            fe.author({'name': news.chore})
+            fe.content(news.content, None, 'html')
             fe.link({'href': news.url, 'rel': 'alternate'})
-        if out_format == 'atom':
-            return fg.atom_str(pretty=True).decode('utf-8')
-        else:
-            return fg.rss_str(pretty=True).decode('utf-8')
+        return fg.atom_str(pretty=True).decode('utf-8')
     else:
         raise ValueError('unsupported output format: %s' % out_format)
 
@@ -184,7 +178,7 @@ def main():
     parser_cron.set_defaults(func=run_update)
     parser_serve = subparsers.add_parser('check', help='Check out the latest news.')
     parser_serve.add_argument('-d', '--db', default='piss.db', help='piss database file')
-    parser_serve.add_argument('-f', '--format', choices=('term', 'text', 'atom', 'rss'), default='term', help='output format')
+    parser_serve.add_argument('-f', '--format', choices=('term', 'text', 'atom'), default='term', help='output format')
     parser_serve.add_argument('-t', '--title', default='PISS Updates', help='news feed title')
     parser_serve.add_argument('-s', '--subtitle', default='New packaging tasks', help='news feed subtitle')
     parser_serve.add_argument('-i', '--id', default='pissnews', help='id for feed formats')

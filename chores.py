@@ -17,6 +17,7 @@ import bs4
 import ftputil
 import requests
 import feedparser
+import markupsafe
 
 __version__ = '0.1'
 
@@ -35,7 +36,7 @@ Event = collections.namedtuple('Event', (
     'category', # Category: commit, issue, pr, tag, release, news
     'time',     # Original unix timestamp of the event message.
     'title',    # Title of the event message.
-    'content',  # Content of the event message.
+    'content',  # Content of the event message, HTML.
     'url'       # URL for continued reading.
 ))
 
@@ -49,6 +50,13 @@ def uniq(seq, key=None): # Dave Kirby
         return [x for x in seq if key(x) not in seen and not seen.add(key(x))]
     else:
         return [x for x in seq if x not in seen and not seen.add(x)]
+
+def sizeof_fmt(num, suffix='B'):
+    for unit in ['','Ki','Mi','Gi','Ti','Pi','Ei','Zi']:
+        if abs(num) < 1024:
+            return "%3.1f%s%s" % (num, unit, suffix)
+        num /= 1024.0
+    return "%.1f%s%s" % (num, 'Yi', suffix)
 
 class ExtendedChoreStatus(ChoreStatus):
     def load(self):
@@ -149,7 +157,8 @@ class GitHubChore(Chore):
     @classmethod
     def detect(cls, name, url):
         urlp = urllib.parse.urlparse(url)
-        assert urlp.netloc == 'github.com'
+        if urlp.netloc != 'github.com':
+            return
         pathseg = urlp.path.lstrip('/').split('/')
         if pathseg[0] == 'downloads':
             pathseg.pop(0)
@@ -170,6 +179,99 @@ class GitHubChore(Chore):
             feed = feedparser.parse(url)
             if feed.entries:
                 return cls(name, repo, category)
+
+class BitbucketChore(Chore):
+    def __init__(self, name, repo, category='release', status=None):
+        self.name = name
+        self.repo = repo
+        # 'release' -> 'downloads'
+        # 'tag' -> 'tags'
+        self.category = category
+        self.status = status or STATUS_NONE
+
+    def dump(self):
+        return ChoreType(self.name, 'bitbucket', {
+            'repo': self.repo,
+            'category': self.category
+        })
+
+    def fetch(self):
+        if self.category == 'release':
+            url = 'https://api.bitbucket.org/2.0/repositories/%s/downloads' % self.repo
+        elif self.category == 'tag':
+            url = 'https://api.bitbucket.org/2.0/repositories/%s/refs/tags' % self.repo
+        else:
+            raise ValueError('unknown category: %s' % self.category)
+        last_updated = self.status.updated
+        old_etag = self.status.last_result
+        if old_etag:
+            req = HSESSION.get(url, headers={'If-None-Match': old_etag},
+                    timeout=30)
+            if req.status_code == 304:
+                self.status = ChoreStatus(int(time.time()), old_etag)
+                req.close()
+                return
+        else:
+            req = HSESSION.get(self.url, timeout=30)
+        req.raise_for_status()
+        self.status = ChoreStatus(int(time.time()), req.headers.get('etag'))
+        d = req.json()
+        if self.category == 'release':
+            title = None
+            messages = []
+            latest = 0
+            for item in d['values']:
+                # throw ugly parsing work to feedparser
+                evt_time_tup = feedparser._parse_date(item['created_on'])
+                evt_time = calendar.timegm(evt_time_tup)
+                latest = max(evt_time, latest)
+                if last_updated and evt_time > last_updated:
+                    if not title:
+                        title = item['name']
+                    messages.append(markupsafe.Markup(
+                        '<p><a href="%s">%s</pre>, %s, %s by <a href="%s">%s</a></p>'
+                        % (
+                        item['links']['html']['href'],
+                        item['name'], sizeof_fmt(d['values'][0]['size']),
+                        time.strftime('%Y-%m-%d', evt_time_tup),
+                        item['links']['html'], item['user']['username'])
+                    ))
+            if messages:
+                yield Event(self.name, self.category, latest,
+                            title, ''.join(messages),
+                            'https://bitbucket.org/%s/downloads' % self.repo)
+        else:
+            for item in d['values']:
+                evt_time = calendar.timegm(
+                    feedparser._parse_date(item['target']['date']))
+                if last_updated and evt_time > last_updated:
+                    yield Event(self.name, self.category, evt_time, item['name'],
+                                markupsafe.Markup('<pre>%s</pre>') %
+                                item['target']['message'],
+                                item['links']['html']['href'])
+
+    @classmethod
+    def detect(cls, name, url):
+        urlp = urllib.parse.urlparse(url)
+        if urlp.netloc != 'bitbucket.org':
+            return
+        pathseg = urlp.path.lstrip('/').split('/')
+        repo = '/'.join(pathseg[:2])
+        if repo.endswith('.git'):
+            repo = repo[:-4]
+        if len(pathseg) > 2:
+            if pathseg[2] == 'downloads':
+                return cls(name, repo, 'release')
+            elif pathseg[2] == 'get':
+                return cls(name, repo, 'tag')
+        for category, url in (
+            ('release', 'https://api.bitbucket.org/2.0/repositories/%s/downloads' % repo),
+            ('tag', 'https://api.bitbucket.org/2.0/repositories/%s/refs/tags' % repo)):
+            req = HSESSION.get(url, timeout=30)
+            if req.status_code == 200:
+                d = req.json()
+                if d.get('values'):
+                    return cls(name, repo, category)
 
 class HTMLSelectorChore(Chore):
     def __init__(self, name, url, selector, regex=None, category=None, status=None):
@@ -213,11 +315,11 @@ class HTMLSelectorChore(Chore):
         elif self.regex:
             entries = []
             for x in tags:
-                match = self.regex.search(' '.join(x.stripped_strings))
+                match = self.regex.search(' '.join(x.stripped_strings).strip())
                 if match:
                     entries.append(match.group(bool(self.regex.groups)))
         else:
-            entries = [x.get_text() for x in tags]
+            entries = [' '.join(x.stripped_strings).strip() for x in tags]
         if not entries:
             warnings.warn("'%s' got nothing." % self.name)
             return
@@ -230,8 +332,10 @@ class HTMLSelectorChore(Chore):
             title = '%s website changed' % self.name
             for text in diff:
                 if text[0] == '+':
-                    title = '%s: %s' % (self.name, text[1:].replace('\n', ' '))
-            content = '\n'.join(diff[2:])
+                    title = text[1:].replace('\r', '').replace('\n', ' ')
+                    break
+            content = (markupsafe.Markup('<pre>%s</pre>') %
+                       markupsafe.Markup('<br/>').join(diff[2:]))
         yield Event(self.name, self.category,
                     int(time.time()), title, content, self.url)
 
@@ -256,7 +360,7 @@ class FTPChore(Chore):
             stat = host.lstat(urlp.path.rstrip('/'))
             if stat.st_mtime != lastupd.get('mtime'):
                 lastupd['mtime'] = stat.st_mtime
-                entries = host.listdir(urlp.path)
+                entries = sorted(host.listdir(urlp.path))
                 lastupd['entries'] = entries
         self.status = self.status.save(lastupd)
         if not old_entries or entries == old_entries:
@@ -266,8 +370,10 @@ class FTPChore(Chore):
             title = '%s FTP directory changed' % self.name
             for text in diff:
                 if text[0] == '+':
-                    title = '%s: %s' % (self.name, text[1:])
-            content = '\n'.join(diff[2:])
+                    title = text[1:]
+                    break
+            content = (markupsafe.Markup('<pre>%s</pre>') %
+                       markupsafe.Markup('<br/>').join(diff[2:]))
         yield Event(self.name, self.category,
                     int(time.time()), title, content, self.url)
 
@@ -336,6 +442,9 @@ def detect_upstream(name, url, version=None):
         try:
             pkgname = os.path.splitext(os.path.basename(urlp.path))[0].rsplit('-', 1)[0]
         except Exception:
+            return
+        if not pkgname:
+            logging.debug('Package name not found: ' + url)
             return
         newurl = 'https://pypi.python.org/simple/%s/' % pkgname
         logging.debug('New url: ' + newurl)
@@ -424,7 +533,7 @@ URL_FILTERED = frozenset((
     'news', 'cgi', 'blog', ''
 ))
 
-RE_IGN = re.compile(r'v?\d+\.\d+|\d+$')
+RE_IGN = re.compile(r'v?\d+\.\d+|\d+$|.$')
 
 def detect_name(url, title):
     urlp = urllib.parse.urlparse(url)

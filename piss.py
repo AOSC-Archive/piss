@@ -96,7 +96,7 @@ def run_update(args):
         while 1:
             for chorename, chore in chores_avail:
                 tasks.enterabs(
-                    chore.status.updated + args.keep,
+                    chore.status.updated + args.keep * 60,
                     chores.CHORE_PRIO[chorename],
                     wrap_fetch, (chore, cur)
                 )

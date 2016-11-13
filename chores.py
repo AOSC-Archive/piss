@@ -413,7 +413,7 @@ class BitbucketChore(Chore):
                 req.close()
                 return
         else:
-            req = HSESSION.get(self.url, timeout=30)
+            req = HSESSION.get(url, timeout=30)
         req.raise_for_status()
         self.status = ChoreStatus(fetch_time, req.headers.get('etag'))
         d = req.json()
@@ -439,7 +439,8 @@ class BitbucketChore(Chore):
                     ))
             if messages:
                 yield Event(self.name, self.category, latest, title,
-                            markupsafe.Markup('<ul>%s</ul>') % ''.join(messages),
+                            markupsafe.Markup('<ul>%s</ul>') %
+                            markupsafe.Markup('').join(messages),
                             'https://bitbucket.org/%s/downloads' % self.repo)
         else:
             for item in d['values']:
@@ -598,7 +599,8 @@ class DirListingChore(Chore):
                     ))
             if messages:
                 yield Event(self.name, self.category, latest, title,
-                            markupsafe.Markup('<ul>%s</ul>') % ''.join(messages),
+                            markupsafe.Markup('<ul>%s</ul>') %
+                            markupsafe.Markup('').join(messages),
                             self.url)
         else:
             entries = [RE_HTMLTAG.sub('', '\t'.join(map(str,
@@ -655,7 +657,9 @@ class FTPChore(Chore):
         fetch_time = int(time.time())
         with ftputil.FTPHost(urlp.hostname, urlp.username or 'anonymous', urlp.password) as host:
             stat = host.lstat(urlp.path.rstrip('/'))
-            if stat.st_mtime != lastupd.get('mtime'):
+            if stat.st_mtime == lastupd.get('mtime'):
+                return
+            else:
                 lastupd['mtime'] = stat.st_mtime
                 entries = sorted(host.listdir(urlp.path))
                 lastupd['entries'] = entries

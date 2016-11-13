@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import os
 import sys
 import time
 import sched
@@ -152,7 +153,7 @@ def format_events(events, out_format, **kwargs):
             fe.link({'href': news.url, 'rel': 'alternate'})
         return fg.atom_str(pretty=True).decode('utf-8')
     elif out_format == 'jinja2':
-        jinjaenv = jinja2.Environment(loader=jinja2.FileSystemLoader('.'))
+        jinjaenv = jinja2.Environment(loader=jinja2.FileSystemLoader(os.path.dirname(__file__)))
         jinjaenv.filters['strftime'] = (
             lambda t, f='%Y-%m-%dT%H:%M:%SZ': time.strftime(f, t))
         template = jinjaenv.get_template(kwargs['template'])

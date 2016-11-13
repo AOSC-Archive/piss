@@ -5,3 +5,4 @@ beautifulsoup4
 PyYAML
 feedgen
 MarkupSafe
+jinja2

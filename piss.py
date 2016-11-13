@@ -13,6 +13,7 @@ import collections
 import chores
 
 import yaml
+import jinja2
 import feedgen.feed
 
 logging.basicConfig(
@@ -100,7 +101,9 @@ def run_update(args):
                 )
             tasks.run()
             db.commit()
-            if not args.keep:
+            if args.keep:
+                logging.info('A round of updating completed.')
+            else:
                 break
     except KeyboardInterrupt:
         logging.warning('Interrupted.')
@@ -148,6 +151,19 @@ def format_events(events, out_format, **kwargs):
             fe.content(news.content, None, 'html')
             fe.link({'href': news.url, 'rel': 'alternate'})
         return fg.atom_str(pretty=True).decode('utf-8')
+    elif out_format == 'jinja2':
+        jinjaenv = jinja2.Environment(loader=jinja2.FileSystemLoader('.'))
+        jinjaenv.filters['strftime'] = (
+            lambda t, f='%Y-%m-%dT%H:%M:%SZ': time.strftime(f, t))
+        template = jinjaenv.get_template(kwargs['template'])
+        kvars = kwargs.copy()
+        kvars['events'] = []
+        for k, news in events:
+            d = news._asdict()
+            d['id'] = k
+            d['time'] = time.gmtime(news.time)
+            kvars['events'].append(d)
+        return template.render(**kvars)
     else:
         raise ValueError('unsupported output format: %s' % out_format)
 
@@ -178,7 +194,8 @@ def main():
     parser_cron.set_defaults(func=run_update)
     parser_serve = subparsers.add_parser('check', help='Check out the latest news.')
     parser_serve.add_argument('-d', '--db', default='piss.db', help='piss database file')
-    parser_serve.add_argument('-f', '--format', choices=('term', 'text', 'atom'), default='term', help='output format')
+    parser_serve.add_argument('-f', '--format', choices=('term', 'text', 'atom', 'jinja2'), default='term', help='output format')
+    parser_serve.add_argument('-T', '--template', help='template file')
     parser_serve.add_argument('-t', '--title', default='PISS Updates', help='news feed title')
     parser_serve.add_argument('-s', '--subtitle', default='New packaging tasks', help='news feed subtitle')
     parser_serve.add_argument('-i', '--id', default='pissnews', help='id for feed formats')

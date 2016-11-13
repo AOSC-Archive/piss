@@ -25,7 +25,7 @@ def setup_yaml():
     """ http://stackoverflow.com/a/8661021 """
     represent_dict_order = lambda self, data: self.represent_mapping(
         'tag:yaml.org,2002:map', data.items())
-    yaml.add_representer(collections.OrderedDict, represent_dict_order)  
+    yaml.add_representer(collections.OrderedDict, represent_dict_order)
 
 def init_db(filename):
     db = sqlite3.connect(filename)

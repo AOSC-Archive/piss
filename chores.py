@@ -185,19 +185,21 @@ def parse_listing(soup):
                             status = 1
                     elif heads[status] == 'modified':
                         timestr = td.get_text().strip()
-                        for regex, fmt in DATETIME_FMTs:
-                            if regex.match(timestr):
-                                file_mod = time.strptime(timestr, fmt)
-                                break
-                        else:
-                            if td.get('data-sort-value'):
-                                file_mod = time.gmtime(int(td['data-sort-value']))
+                        if timestr:
+                            for regex, fmt in DATETIME_FMTs:
+                                if regex.match(timestr):
+                                    file_mod = time.strptime(timestr, fmt)
+                                    break
                             else:
-                                raise AssertionError("can't identify date/time format")
+                                if td.get('data-sort-value'):
+                                    file_mod = time.gmtime(int(td['data-sort-value']))
+                                else:
+                                    raise AssertionError(
+                                        "can't identify date/time format")
                         status += 1
                     elif heads[status] == 'size':
                         sizestr = td.get_text().strip()
-                        if sizestr == '-':
+                        if sizestr == '-' or not sizestr:
                             file_size = None
                         elif td.get('data-sort-value'):
                             file_size = int(td['data-sort-value'])

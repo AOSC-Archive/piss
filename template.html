@@ -83,10 +83,10 @@ p {
 <div class="container">
 <main>
 {% for item in events %}
-<article class="news">
+<article class="news" id="n-{{ item['id'] }}">
 <h2 class="newsheader">{{ item['chore'] }}: <a href="{{ item['url'] }}">{{ item['title']|e }}</a></h2>
 <small>
-<time class="pub" datetime="{{ item['time']|strftime }}">{{ item['time']|strftime('%Y-%m-%d') }}</time> -
+<time class="pub" datetime="{{ item['time']|strftime }}">{{ item['time']|strftime('%Y-%m-%d %H:%M') }}</time> -
 <span class="category">{{ item['category']|capitalize }}</span>
 </small>
 <div class="content">{{ item['content'] }}</div>

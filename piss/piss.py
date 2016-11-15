@@ -11,7 +11,7 @@ import argparse
 import datetime
 import collections
 
-import chores
+from . import chores
 
 import yaml
 import jinja2
@@ -153,7 +153,8 @@ def format_events(events, out_format, **kwargs):
             fe.link({'href': news.url, 'rel': 'alternate'})
         return fg.atom_str(pretty=True).decode('utf-8')
     elif out_format == 'jinja2':
-        jinjaenv = jinja2.Environment(loader=jinja2.FileSystemLoader(os.path.dirname(__file__)))
+        jinjaenv = jinja2.Environment(loader=jinja2.FileSystemLoader(
+            os.path.normpath(os.path.join(os.path.dirname(__file__), 'templates'))))
         jinjaenv.filters['strftime'] = (
             lambda t, f='%Y-%m-%dT%H:%M:%SZ': time.strftime(f, t))
         template = jinjaenv.get_template(kwargs['template'])
@@ -209,5 +210,35 @@ def main():
     args.func(args)
     return 0
 
-if __name__ == '__main__':
-    sys.exit(main())
+def main(argv):
+    parser = argparse.ArgumentParser(description='Projects Information Storage System')
+    subparsers = parser.add_subparsers()
+    parser_gen = subparsers.add_parser('generate', help='Try to generate a chores config file from abbs-meta database or browser bookmarks.')
+    parser_gen.add_argument('-d', '--db', help='abbs-meta database file')
+    parser_gen.add_argument('-b', '--bookmark', help='browser exported HTML bookmark file')
+    parser_gen.add_argument('-e', '--existing', help='base on this existing config file')
+    parser_gen.add_argument('output', nargs='?', default='chores.yaml', help='output YAML file')
+    parser_gen.set_defaults(func=generate_config)
+    parser_cron = subparsers.add_parser('run', help='Get updates.')
+    parser_cron.add_argument('-d', '--db', default='piss.db', help='piss database file')
+    parser_cron.add_argument('-c', '--chores', default='chores.yaml', help='chores YAML config file')
+    parser_cron.add_argument('-k', '--keep', type=int, metavar='INTERVAL', default=0, help='keep running, check updates every INTERVAL minutes')
+    parser_cron.set_defaults(func=run_update)
+    parser_serve = subparsers.add_parser('check', help='Check out the latest news.')
+    parser_serve.add_argument('-d', '--db', default='piss.db', help='piss database file')
+    parser_serve.add_argument('-f', '--format', choices=('term', 'text', 'atom', 'jinja2'), default='term', help='output format')
+    parser_serve.add_argument('-T', '--template', help='template file')
+    parser_serve.add_argument('-t', '--title', default='PISS Updates', help='news feed title')
+    parser_serve.add_argument('-s', '--subtitle', default='New packaging tasks', help='news feed subtitle')
+    parser_serve.add_argument('-i', '--id', default='pissnews', help='id for feed formats')
+    parser_serve.add_argument('-l', '--link', help='url for PISS website')
+    parser_serve.add_argument('-L', '--lang', default='en', help='language setting for feed formats')
+    parser_serve.add_argument('-n', '--number', type=int, metavar='NUM', default=100, help='limit max number of events (default: 100, all: 0)')
+    parser_serve.add_argument('output', nargs='?', default='-', help='output feed')
+    parser_serve.set_defaults(func=generate_feed)
+    args = parser.parse_args(argv)
+    if vars(args):
+        args.func(args)
+    else:
+        parser.print_help()
+    return 0

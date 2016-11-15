@@ -19,7 +19,7 @@ import requests
 import feedparser
 import markupsafe
 
-__version__ = '0.2'
+from .version import __version__
 
 USER_AGENT = 'Mozilla/5.0 (compatible; PISS/%s; +https://github.com/AOSC-Dev/piss)' % __version__
 
@@ -42,6 +42,8 @@ RE_COMMONHEAD = re.compile('Name|(Last )?modified|Size|Description|Metadata|Type
 RE_HASTEXT = re.compile('.+')
 
 RE_HTMLTAG = re.compile('</?[^>]+>')
+
+RE_BADURL = re.compile('^https?://(/?[^\./]+/.+)$')
 
 FileEntry = collections.namedtuple('FileEntry', 'name modified size description')
 
@@ -310,8 +312,14 @@ class FeedChore(Chore):
         for e in feed.entries:
             evt_time = int(calendar.timegm(e.updated_parsed))
             if last_updated and evt_time > last_updated:
+                evturl = e.link
+                match = RE_BADURL.match(evturl)
+                if match:
+                    evturl = urllib.parse.urljoin(self.url, match.group(1))
+                else:
+                    evturl = urllib.parse.urljoin(self.url, evturl)
                 yield Event(self.name, self.category,
-                            evt_time, e.title, e.summary, e.link)
+                            evt_time, e.title, e.summary, evturl)
 
     @classmethod
     def detect(cls, name, url):
@@ -535,7 +543,7 @@ class HTMLSelectorChore(Chore):
         else:
             diff = tuple(difflib.unified_diff(old_entries, entries, lineterm=''))
             title = '%s website changed' % self.name
-            for text in diff:
+            for text in diff[2:]:
                 if text[0] == '+':
                     title = text[1:].replace('\r', '').replace('\n', ' ')
                     break
@@ -618,7 +626,7 @@ class DirListingChore(Chore):
             else:
                 diff = tuple(difflib.unified_diff(old_entries, entries, lineterm=''))
                 title = '%s files changed' % self.name
-                for text in diff:
+                for text in diff[2:]:
                     if text[0] == '+':
                         title = text[1:].replace('\n', ' ').rstrip('/')
                         break
@@ -671,7 +679,7 @@ class FTPChore(Chore):
         else:
             diff = tuple(difflib.unified_diff(old_entries, entries, lineterm=''))
             title = '%s FTP directory changed' % self.name
-            for text in diff:
+            for text in diff[2:]:
                 if text[0] == '+':
                     title = text[1:]
                     break

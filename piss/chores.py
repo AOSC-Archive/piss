@@ -283,7 +283,7 @@ class Chore:
         return
 
     @classmethod
-    def detect(cls, name, url):
+    def detect(cls, name, url, **kwargs):
         return None
 
     def __repr__(self):
@@ -322,7 +322,7 @@ class FeedChore(Chore):
                             evt_time, e.title, e.summary, evturl)
 
     @classmethod
-    def detect(cls, name, url):
+    def detect(cls, name, url, **kwargs):
         if 'atom' in url or 'rss' in url or 'xml' in url:
             return cls(name, url)
         feed = feedparser.parse(url)
@@ -365,7 +365,7 @@ class GitHubChore(Chore):
                             evt_time, e.title, e.summary, e.link)
 
     @classmethod
-    def detect(cls, name, url):
+    def detect(cls, name, url, **kwargs):
         urlp = urllib.parse.urlparse(url)
         if urlp.netloc != 'github.com':
             return
@@ -463,7 +463,7 @@ class BitbucketChore(Chore):
                                 item['links']['html']['href'])
 
     @classmethod
-    def detect(cls, name, url):
+    def detect(cls, name, url, **kwargs):
         urlp = urllib.parse.urlparse(url)
         if urlp.netloc != 'bitbucket.org':
             return
@@ -624,7 +624,7 @@ class DirListingChore(Chore):
                         self.url)
 
     @classmethod
-    def detect(cls, name, url):
+    def detect(cls, name, url, **kwargs):
         req = HSESSION.get(url, timeout=30)
         soup = bs4.BeautifulSoup(req.content, 'html5lib')
         try:
@@ -632,7 +632,7 @@ class DirListingChore(Chore):
         except Exception:
             return
         if listing:
-            return cls(name, url)
+            return cls(name, url, **kwargs)
         else:
             return
 
@@ -657,11 +657,14 @@ class FTPChore(Chore):
         old_entries = lastupd.get('entries')
         fetch_time = int(time.time())
         with ftputil.FTPHost(urlp.hostname, urlp.username or 'anonymous', urlp.password) as host:
-            stat = host.lstat(urlp.path.rstrip('/'))
-            if stat.st_mtime == lastupd.get('mtime'):
+            try:
+                st_mtime = host.lstat(urlp.path.rstrip('/')).st_mtime
+            except ftputil.error.RootDirError:
+                st_mtime = None
+            if st_mtime == lastupd.get('mtime'):
                 return
             else:
-                lastupd['mtime'] = stat.st_mtime
+                lastupd['mtime'] = st_mtime
                 entries = sorted(x for x in host.listdir(urlp.path) if
                                  (not self.regex or self.regex.search(x)))
                 lastupd['entries'] = entries
@@ -678,6 +681,16 @@ class FTPChore(Chore):
             content = (markupsafe.Markup('<pre>%s</pre>') % '\n'.join(diff[2:]))
         yield Event(self.name, self.category,
                     lastupd.get('mtime') or fetch_time, title, content, self.url)
+
+    @classmethod
+    def detect(cls, name, url, **kwargs):
+        urlp = urllib.parse.urlparse(url)
+        with ftputil.FTPHost(urlp.hostname, urlp.username or 'anonymous', urlp.password) as host:
+            try:
+                host.listdir(urlp.path)
+                return cls(name, url, **kwargs)
+            except ftputil.error.PermanentError:
+                return
 
 class IMAPChore(Chore):
     def __init__(self, name, host, username, password, folder, subject_regex='.*', from_regex='.*', body_regex='.*', category=None, status=None):
@@ -780,7 +793,11 @@ def detect_upstream(name, url, version=None):
         dirregex = None
         if filename and name not in newurl and name in filename:
             dirregex = re.escape(name)
-        return FTPChore(name, newurl, dirregex)
+        ch = FTPChore.detect(name, newurl, dirregex)
+        if ch:
+            return ch
+        else:
+            return
     elif urlp.path.rstrip('/').endswith('.git'):
         return
     elif urlp.scheme in ('http', 'https'):
@@ -862,10 +879,8 @@ def detect_upstream(name, url, version=None):
                     'https://sourceforge.net/projects/%s/rss?path=/' %
                     urlp.hostname.split('.', 1)[0], 'file')
         if title and 'download' in title.lower():
-            ch = DirListingChore.detect(name, newurl)
+            ch = DirListingChore.detect(name, newurl, dirregex)
             if ch:
-                if dirregex:
-                    ch.regex = re.compile(dirregex)
                 return ch
             else:
                 return HTMLSelectorChore(name, newurl, 'a[href]', None, 'file')

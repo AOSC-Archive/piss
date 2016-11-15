@@ -568,7 +568,6 @@ class DirListingChore(Chore):
 
     def fetch(self):
         lastupd = self.status.load()
-        last_updated = self.status.updated
         old_etag = lastupd.get('etag')
         fetch_time = int(time.time())
         if old_etag:
@@ -584,55 +583,42 @@ class DirListingChore(Chore):
         lastupd['etag'] = req.headers.get('etag')
         # html5lib for badly escaped sites
         soup = bs4.BeautifulSoup(req.content, 'html5lib')
-        cwd, listing = parse_listing(soup)
+        cwd, entries = parse_listing(soup)
         title = None
-        if any(x.modified for x in listing):
-            self.status = self.status.save(fetch_time, lastupd)
-            messages = []
-            latest = 0
-            for item in listing:
-                evt_time_tup = item.modified or time.gmtime(0)
-                evt_time = calendar.timegm(evt_time_tup)
-                latest = max(evt_time, latest)
-                if last_updated and evt_time > last_updated:
-                    if not title:
-                        title = item.name.rstrip('/')
-                    attrs = [time.strftime('%Y-%m-%d', evt_time_tup)]
-                    if item.size is not None:
-                        attrs.append(sizeof_fmt(item.size))
-                    if item.description is not None:
-                        attrs.append(RE_HTMLTAG.sub('', item.description))
-                    messages.append(markupsafe.Markup(
-                        '<li><a href="%s">%s</a>, %s</li>' % (
-                        urllib.parse.urljoin(self.url, urllib.parse.quote(item.name)),
-                        item.name, ', '.join(attrs))
-                    ))
-            if messages:
-                yield Event(self.name, self.category, latest, title,
-                            markupsafe.Markup('<ul>%s</ul>') %
-                            markupsafe.Markup('').join(messages),
-                            self.url)
-        else:
-            entries = [RE_HTMLTAG.sub('', '\t'.join(map(str,
-                       filter(lambda x: x is not None, i)))) for i in listing]
-            if not entries:
-                warnings.warn("'%s' got nothing." % self.name)
-                return
-            old_entries = lastupd.get('entries')
-            lastupd['entries'] = entries
-            self.status = self.status.save(fetch_time, lastupd)
-            if not old_entries or entries == old_entries:
-                return
-            else:
-                diff = tuple(difflib.unified_diff(old_entries, entries, lineterm=''))
-                title = '%s files changed' % self.name
-                for text in diff[2:]:
-                    if text[0] == '+':
-                        title = text[1:].replace('\n', ' ').rstrip('/')
-                        break
-                content = (markupsafe.Markup('<pre>%s</pre>') % '\n'.join(diff[2:]))
-            yield Event(self.name, self.category,
-                        fetch_time, title, content, self.url)
+        if not entries:
+            warnings.warn("'%s' got nothing." % self.name)
+            return
+        old_entries = lastupd.get('entries')
+        lastupd['entries'] = entries
+        self.status = self.status.save(fetch_time, lastupd)
+        if not old_entries or entries == old_entries:
+            return
+        old_entries_set = frozenset(old_entries)
+        messages = []
+        latest = 0
+        for item in entries:
+            if item in old_entries_set:
+                continue
+            if not title:
+                title = item.name.rstrip('/')
+            attrs = []
+            if item.modified:
+                attrs.append(time.strftime('%Y-%m-%d %H:%M', item.modified))
+                latest = max(min(calendar.timegm(item.modified), fetch_time), latest)
+            if item.size is not None:
+                attrs.append(sizeof_fmt(item.size))
+            if item.description is not None:
+                attrs.append(RE_HTMLTAG.sub('', item.description))
+            messages.append(markupsafe.Markup(
+                '<li><a href="%s">%s</a>, %s</li>' % (
+                    urllib.parse.urljoin(self.url, urllib.parse.quote(item.name)),
+                    item.name, ', '.join(attrs))
+                ))
+        if messages:
+            yield Event(self.name, self.category, latest or fetch_time,
+                        title, markupsafe.Markup('<ul>%s</ul>') %
+                        markupsafe.Markup('').join(messages),
+                        self.url)
 
     @classmethod
     def detect(cls, name, url):

@@ -554,15 +554,17 @@ class HTMLSelectorChore(Chore):
 class DirListingChore(Chore):
     '''Handle Apache/nginx-style directory listing pages.'''
 
-    def __init__(self, name, url, category='file', status=None):
+    def __init__(self, name, url, regex=None, category='file', status=None):
         self.name = name
         self.url = url
+        self.regex = regex and re.compile(regex)
         self.category = category
         self.status = ExtendedChoreStatus(*(status or STATUS_NONE))
 
     def dump(self):
         return ChoreType(self.name, 'dirlist', {
             'url': self.url,
+            'regex': self.regex and self.regex.pattern,
             'category': self.category
         })
 
@@ -597,7 +599,8 @@ class DirListingChore(Chore):
         messages = []
         latest = 0
         for item in entries:
-            if item in old_entries_set:
+            if (item in old_entries_set or
+                (self.regex and not self.regex.search(item.name))):
                 continue
             if not title:
                 title = item.name.rstrip('/')
@@ -634,15 +637,17 @@ class DirListingChore(Chore):
             return
 
 class FTPChore(Chore):
-    def __init__(self, name, url, category='file', status=None):
+    def __init__(self, name, url, regex=None, category='file', status=None):
         self.name = name
         self.url = url
+        self.regex = regex and re.compile(regex)
         self.category = category
         self.status = ExtendedChoreStatus(*(status or STATUS_NONE))
 
     def dump(self):
         return ChoreType(self.name, 'ftp', {
             'url': self.url,
+            'regex': self.regex and self.regex.pattern,
             'category': self.category
         })
 
@@ -657,7 +662,8 @@ class FTPChore(Chore):
                 return
             else:
                 lastupd['mtime'] = stat.st_mtime
-                entries = sorted(host.listdir(urlp.path))
+                entries = sorted(x for x in host.listdir(urlp.path) if
+                                 (not self.regex or self.regex.search(x)))
                 lastupd['entries'] = entries
         self.status = self.status.save(fetch_time, lastupd)
         if not old_entries or entries == old_entries:
@@ -738,9 +744,9 @@ RE_SF = re.compile('^(/projects/[^/]+)/(.+)$')
 def detect_upstream(name, url, version=None):
     urlp = urllib.parse.urlparse(url)
     if urlp.netloc == 'github.com':
-        return CHORE_HANDLERS['github'].detect(name, url)
+        return GitHubChore.detect(name, url)
     elif urlp.netloc == 'bitbucket.org':
-        return CHORE_HANDLERS['bitbucket'].detect(name, url)
+        return BitbucketChore.detect(name, url)
     elif urlp.netloc in ('pypi.io', 'pypi.python.org'):
         try:
             pkgname = os.path.splitext(os.path.basename(urlp.path))[0].rsplit('-', 1)[0]
@@ -763,20 +769,28 @@ def detect_upstream(name, url, version=None):
                 'http://feeds.launchpad.net/%s/announcements.atom' % projname, 'news')
     elif urlp.scheme == 'ftp':
         newurlp = list(urlp)
+        filename = None
         if urlp.path[-1] != '/':
-            newurlp[2] = os.path.dirname(urlp.path) + '/'
+            newurlp[2], filename = os.path.split(urlp.path)
+            if newurlp[2] != '/':
+                newurlp[2] += '/'
         if version:
             newurlp[2] = remove_package_version(name, newurlp[2], version)
-        return FTPChore(name, urllib.parse.urlunparse(newurlp))
+        newurl = urllib.parse.urlunparse(newurlp)
+        dirregex = None
+        if filename and name not in newurl and name in filename:
+            dirregex = re.escape(name)
+        return FTPChore(name, newurl, dirregex)
     elif urlp.path.rstrip('/').endswith('.git'):
         return
     elif urlp.scheme in ('http', 'https'):
         newurlp = list(urlp)
         category = None
+        filename = None
         if not urlp.query:
             ext = os.path.splitext(urlp.path)[1]
             if ext in COMMON_EXT:
-                newurlp[2] = os.path.dirname(urlp.path)
+                newurlp[2], filename = os.path.split(urlp.path)
                 if newurlp[2] != '/':
                     newurlp[2] += '/'
             if urlp.hostname == 'sourceforge.net':
@@ -830,11 +844,14 @@ def detect_upstream(name, url, version=None):
             logging.warning('Webpage too large: ' + newurl)
             return
         soup = bs4.BeautifulSoup(req.content, 'html5lib')
+        dirregex = None
+        if filename and name not in newurl and name in filename:
+            dirregex = re.escape(name)
         title = None
         if soup.title:
             title = soup.title.string
-            if title.startswith('Index of'):
-                return DirListingChore(name, newurl, 'file')
+            if title and title.startswith('Index of'):
+                return DirListingChore(name, newurl, dirregex, 'file')
         feedlink = soup.find('a', href=RE_FEED)
         if feedlink:
             return FeedChore(name,
@@ -845,14 +862,16 @@ def detect_upstream(name, url, version=None):
                     'https://sourceforge.net/projects/%s/rss?path=/' %
                     urlp.hostname.split('.', 1)[0], 'file')
         if title and 'download' in title.lower():
-            ch = CHORE_HANDLERS['dirlist'].detect(name, newurl)
+            ch = DirListingChore.detect(name, newurl)
             if ch:
+                if dirregex:
+                    ch.regex = re.compile(dirregex)
                 return ch
             else:
                 return HTMLSelectorChore(name, newurl, 'a[href]', None, 'file')
         githublink = soup.find('a', href=RE_GITHUB)
         if githublink:
-            return CHORE_HANDLERS['github'].detect(name, githublink['href'])
+            return GitHubChore.detect(name, githublink['href'])
     return None
 
 URL_FILTERED = frozenset((

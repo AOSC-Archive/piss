@@ -33,12 +33,13 @@ DATETIME_FMTs = (
 (re.compile(r'\d{4}-\d+-\d+ \d+:\d{2}'), "%Y-%m-%d %H:%M"),
 (re.compile(r'\d{4}-[A-S][a-y]{2}-\d+ \d+:\d{2}:\d{2}'), "%Y-%b-%d %H:%M:%S"),
 (re.compile(r'[F-W][a-u]{2} [A-S][a-y]{2} +\d+ \d{2}:\d{2}:\d{2} \d{4}'), "%a %b %d %H:%M:%S %Y"),
-(re.compile(r'\d{4}-\d+-\d+'), "%Y-%m-%d")
+(re.compile(r'\d{4}-\d+-\d+'), "%Y-%m-%d"),
+(re.compile(r'\d+/\d+/\d{4} \d{2}:\d{2}:\d{2} [+-]\d{4}'), "%d/%m/%Y %H:%M:%S %z")
 )
 
 RE_FILESIZE = re.compile(r'\d+(\.\d+)? ?[BKMGTPEZY]|\d+|-', re.I)
 RE_ABSPATH = re.compile(r'^((ht|f)tps?:/)?/')
-RE_COMMONHEAD = re.compile('Name|(Last )?modified|Size|Description|Metadata|Type|Parent Directory', re.I)
+RE_COMMONHEAD = re.compile('Name|(Last )?modifi(ed|cation)|date|Size|Description|Metadata|Type|Parent Directory', re.I)
 RE_HASTEXT = re.compile('.+')
 
 RE_HTMLTAG = re.compile('</?[^>]+>')
@@ -63,6 +64,9 @@ Event = collections.namedtuple('Event', (
 
 HSESSION = requests.Session()
 HSESSION.headers['User-Agent'] = USER_AGENT
+
+def deep_tuple(t):
+    return tuple(map(deep_tuple, t)) if isinstance(t, (list, tuple)) else t
 
 def uniq(seq, key=None): # Dave Kirby
     # Order preserving
@@ -173,17 +177,19 @@ def parse_listing(soup):
                 for td in tr.find_all('td'):
                     if td.get('colspan'):
                         continue
-                    elif status == 0:
+                    elif heads[status] == 'name':
                         if not td.a:
                             continue
                         a_str = td.a.get_text().strip()
                         a_href = td.a['href']
-                        if not a_str or not a_href:
+                        if not a_str or not a_href or a_href[0] == '#':
                             continue
                         elif a_str == 'Parent Directory' or a_href == '../':
                             break
                         else:
                             file_name = urllib.parse.unquote(a_href)
+                            if file_name.endswith(a_str):
+                                file_name = a_str
                             status = 1
                     elif heads[status] == 'modified':
                         timestr = td.get_text().strip()
@@ -233,9 +239,11 @@ def parse_listing(soup):
                         continue
                     elif name in ('name', 'size', 'description'):
                         heads.append(name)
-                    elif name.endswith('name') or name.startswith('file'):
+                    elif (name.endswith('name') or name.startswith('file')
+                          or name.startswith('download')):
                         heads.append('name')
-                    elif name.endswith('modified') or name.startswith('uploaded'):
+                    elif ('modifi' in name or name.startswith('uploaded')
+                          or 'date' in name):
                         heads.append('modified')
                     elif 'size' in name:
                         heads.append('size')
@@ -243,8 +251,11 @@ def parse_listing(soup):
                         heads.append('signature')
                     else:
                         heads.append('description')
-                if not heads or 'name' not in heads:
+                if not heads:
                     heads = ('name', 'modified', 'size', 'description')
+                elif 'name' not in heads:
+                    heads[0] = 'name'
+                # logging.debug(heads)
                 started = True
                 continue
     elif soup.ul:
@@ -292,15 +303,17 @@ class Chore:
             ', '.join('%s=%s' % (k, v) for k, v in self.dump().kwargs))
 
 class FeedChore(Chore):
-    def __init__(self, name, url, category=None, status=None):
+    def __init__(self, name, url, title_regex=None, category='news', status=None):
         self.name = name
         self.url = url
+        self.title_regex = title_regex and re.compile(title_regex)
         self.category = category
         self.status = status or STATUS_NONE
 
     def dump(self):
         return ChoreType(self.name, 'feed', {
             'url': self.url,
+            'title_regex': self.title_regex and self.title_regex.pattern,
             'category': self.category
         })
 
@@ -318,8 +331,9 @@ class FeedChore(Chore):
                     evturl = urllib.parse.urljoin(self.url, match.group(1))
                 else:
                     evturl = urllib.parse.urljoin(self.url, evturl)
-                yield Event(self.name, self.category,
-                            evt_time, e.title, e.summary, evturl)
+                if not self.title_regex or self.title_regex.search(e.title):
+                    yield Event(self.name, self.category,
+                                evt_time, e.title, e.summary, evturl)
 
     @classmethod
     def detect(cls, name, url, **kwargs):
@@ -590,7 +604,7 @@ class DirListingChore(Chore):
         if not entries:
             warnings.warn("'%s' got nothing." % self.name)
             return
-        old_entries = lastupd.get('entries')
+        old_entries = [deep_tuple(x) for x in (lastupd.get('entries') or ())]
         lastupd['entries'] = entries
         self.status = self.status.save(fetch_time, lastupd)
         if not old_entries or entries == old_entries:
@@ -613,9 +627,9 @@ class DirListingChore(Chore):
             if item.description is not None:
                 attrs.append(RE_HTMLTAG.sub('', item.description))
             messages.append(markupsafe.Markup(
-                '<li><a href="%s">%s</a>, %s</li>' % (
+                '<li><a href="%s">%s</a>%s%s</li>' % (
                     urllib.parse.urljoin(self.url, urllib.parse.quote(item.name)),
-                    item.name, ', '.join(attrs))
+                    item.name, ', ' if attrs else '', ', '.join(attrs))
                 ))
         if messages:
             yield Event(self.name, self.category, latest or fetch_time,
@@ -673,7 +687,7 @@ class FTPChore(Chore):
             return
         else:
             diff = tuple(difflib.unified_diff(old_entries, entries, lineterm=''))
-            title = '%s FTP directory changed' % self.name
+            title = 'FTP directory changed'
             for text in diff[2:]:
                 if text[0] == '+':
                     title = text[1:]

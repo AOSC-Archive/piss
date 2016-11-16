@@ -675,7 +675,7 @@ class FTPChore(Chore):
                 st_mtime = host.lstat(urlp.path.rstrip('/')).st_mtime
             except ftputil.error.RootDirError:
                 st_mtime = None
-            if st_mtime == lastupd.get('mtime'):
+            if st_mtime and st_mtime == lastupd.get('mtime'):
                 return
             else:
                 lastupd['mtime'] = st_mtime

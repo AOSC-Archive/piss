@@ -20,6 +20,7 @@ import feedparser
 import markupsafe
 
 from .version import __version__
+from .htmllistparse import parse as parse_listing
 
 USER_AGENT = 'Mozilla/5.0 (compatible; PISS/%s; +https://github.com/AOSC-Dev/piss)' % __version__
 
@@ -27,21 +28,6 @@ RE_FEED = re.compile("(^|\W)(atom|rss|feed(?!back))", re.I)
 RE_GITHUB = re.compile("github.com", re.I)
 
 COMMON_EXT = frozenset(('.gz', '.bz2', '.xz', '.tar', '.7z', '.rar', '.zip'))
-
-DATETIME_FMTs = (
-(re.compile(r'\d+-[A-S][a-y]{2}-\d{4} \d+:\d{2}'), "%d-%b-%Y %H:%M"),
-(re.compile(r'\d{4}-\d+-\d+ \d+:\d{2}:\d{2}'), "%Y-%m-%d %H:%M:%S"),
-(re.compile(r'\d{4}-\d+-\d+ \d+:\d{2}'), "%Y-%m-%d %H:%M"),
-(re.compile(r'\d{4}-[A-S][a-y]{2}-\d+ \d+:\d{2}:\d{2}'), "%Y-%b-%d %H:%M:%S"),
-(re.compile(r'[F-W][a-u]{2} [A-S][a-y]{2} +\d+ \d{2}:\d{2}:\d{2} \d{4}'), "%a %b %d %H:%M:%S %Y"),
-(re.compile(r'\d{4}-\d+-\d+'), "%Y-%m-%d"),
-(re.compile(r'\d+/\d+/\d{4} \d{2}:\d{2}:\d{2} [+-]\d{4}'), "%d/%m/%Y %H:%M:%S %z")
-)
-
-RE_FILESIZE = re.compile(r'\d+(\.\d+)? ?[BKMGTPEZY]|\d+|-', re.I)
-RE_ABSPATH = re.compile(r'^((ht|f)tps?:/)?/')
-RE_COMMONHEAD = re.compile('Name|(Last )?modifi(ed|cation)|date|Size|Description|Metadata|Type|Parent Directory', re.I)
-RE_HASTEXT = re.compile('.+')
 
 RE_HTMLTAG = re.compile('</?[^>]+>')
 
@@ -103,174 +89,6 @@ def human2bytes(s):
         for i, s in enumerate(symbols[1:]):
             prefix[s] = 1 << (i+1)*10
         return int(num * prefix[letter])
-
-def parse_listing(soup):
-    '''
-    Try to parse apache/nginx-style directory listing with all kinds of tricks.
-
-    Exceptions or an empty listing suggust a failure.
-    We strongly recommend generating the `soup` with 'html5lib'.
-    '''
-    cwd = None
-    listing = []
-    if soup.title and soup.title.string.startswith('Index of '):
-        cwd = soup.title.string[9:]
-    elif soup.h1:
-        title = soup.h1.get_text().strip()
-        if title.startswith('Index of '):
-            cwd = title.string[9:]
-    [img.decompose() for img in soup.find_all('img')]
-    file_name = file_mod = file_size = file_desc = None
-    pres = [x for x in soup.find_all('pre') if
-            x.find('a', string=RE_HASTEXT)]
-    tables = [x for x in soup.find_all('table') if
-              x.find(string=RE_COMMONHEAD)] if not pres else ()
-    heads = []
-    if pres:
-        pre = pres[0]
-        started = False
-        for element in (pre.hr.next_siblings if pre.hr else pre.children):
-            if element.name == 'a':
-                if not element.string or not element.string.strip():
-                    continue
-                elif started:
-                    if file_name:
-                        listing.append(FileEntry(
-                            file_name, file_mod, file_size, file_desc))
-                    file_name = urllib.parse.unquote(element['href'])
-                    file_mod = file_size = file_desc = None
-                elif (element.string in ('Parent Directory', '..', '../') or
-                      element['href'][0] not in '?/'):
-                    started = True
-            elif not element.name:
-                line = element.string.replace('\r', '').split('\n', 1)[0].lstrip()
-                for regex, fmt in DATETIME_FMTs:
-                    match = regex.match(line)
-                    if match:
-                        file_mod = time.strptime(match.group(0), fmt)
-                        line = line[match.end():].lstrip()
-                        break
-                match = RE_FILESIZE.match(line)
-                if match:
-                    sizestr = match.group(0)
-                    if sizestr == '-':
-                        file_size = None
-                    else:
-                        file_size = human2bytes(sizestr.replace(' ', ''))
-                    line = line[match.end():].lstrip()
-                if line:
-                    file_desc = line.rstrip()
-                    if file_name and file_desc == '/':
-                        file_name += '/'
-                        file_desc = None
-            else:
-                continue
-        if file_name:
-            listing.append(FileEntry(file_name, file_mod, file_size, file_desc))
-    elif tables:
-        started = False
-        for tr in tables[0].find_all('tr'):
-            status = 0
-            file_name = file_mod = file_size = file_desc = None
-            if started:
-                if tr.parent.name in ('thead', 'tfoot') or tr.th:
-                    continue
-                for td in tr.find_all('td'):
-                    if td.get('colspan'):
-                        continue
-                    elif heads[status] == 'name':
-                        if not td.a:
-                            continue
-                        a_str = td.a.get_text().strip()
-                        a_href = td.a['href']
-                        if not a_str or not a_href or a_href[0] == '#':
-                            continue
-                        elif a_str == 'Parent Directory' or a_href == '../':
-                            break
-                        else:
-                            file_name = urllib.parse.unquote(a_href)
-                            if file_name.endswith(a_str):
-                                file_name = a_str
-                            status = 1
-                    elif heads[status] == 'modified':
-                        timestr = td.get_text().strip()
-                        if timestr:
-                            for regex, fmt in DATETIME_FMTs:
-                                if regex.match(timestr):
-                                    file_mod = time.strptime(timestr, fmt)
-                                    break
-                            else:
-                                if td.get('data-sort-value'):
-                                    file_mod = time.gmtime(int(td['data-sort-value']))
-                                else:
-                                    raise AssertionError(
-                                        "can't identify date/time format")
-                        status += 1
-                    elif heads[status] == 'size':
-                        sizestr = td.get_text().strip()
-                        if sizestr == '-' or not sizestr:
-                            file_size = None
-                        elif td.get('data-sort-value'):
-                            file_size = int(td['data-sort-value'])
-                        else:
-                            match = RE_FILESIZE.match(sizestr)
-                            if match:
-                                file_size = human2bytes(
-                                    match.group(0).replace(' ', ''))
-                            else:
-                                file_size = None
-                        status += 1
-                    elif heads[status] == 'description':
-                        file_desc = file_desc or ''.join(map(str, td.children)
-                                        ).strip('\xa0').strip() or None
-                        status += 1
-                    elif status:
-                        # unknown header
-                        status += 1
-                if file_name:
-                    listing.append(FileEntry(
-                        file_name, file_mod, file_size, file_desc))
-            elif tr.hr:
-                started = True
-                continue
-            elif tr.find(string=RE_COMMONHEAD):
-                for th in (tr.find_all('th') if tr.th else tr.find_all('td')):
-                    name = th.get_text().strip('\xa0').strip().lower()
-                    if not name:
-                        continue
-                    elif name in ('name', 'size', 'description'):
-                        heads.append(name)
-                    elif (name.endswith('name') or name.startswith('file')
-                          or name.startswith('download')):
-                        heads.append('name')
-                    elif ('modifi' in name or name.startswith('uploaded')
-                          or 'date' in name):
-                        heads.append('modified')
-                    elif 'size' in name:
-                        heads.append('size')
-                    elif name.endswith('signature'):
-                        heads.append('signature')
-                    else:
-                        heads.append('description')
-                if not heads:
-                    heads = ('name', 'modified', 'size', 'description')
-                elif 'name' not in heads:
-                    heads[0] = 'name'
-                # logging.debug(heads)
-                started = True
-                continue
-    elif soup.ul:
-        for li in soup.ul.find_all('li'):
-            a = li.a
-            if not a or not a.get('href'):
-                continue
-            file_name = urllib.parse.unquote(a['href'])
-            if (file_name in ('Parent Directory', '.', './', '..', '../', '#')
-                or RE_ABSPATH.match(file_name)):
-                continue
-            else:
-                listing.append(FileEntry(file_name, None, None, None))
-    return cwd, listing
 
 class ExtendedChoreStatus(ChoreStatus):
     def load(self):

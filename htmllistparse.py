@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import os
 import re
 import time
 import collections
@@ -8,16 +9,20 @@ import urllib.parse
 
 import bs4
 
+RE_ISO8601 = re.compile(r'\d{4}-\d+-\d+T\d+:\d{2}:\d{2}Z')
 DATETIME_FMTs = (
 (re.compile(r'\d+-[A-S][a-y]{2}-\d{4} \d+:\d{2}:\d{2}'), "%d-%b-%Y %H:%M:%S"),
 (re.compile(r'\d+-[A-S][a-y]{2}-\d{4} \d+:\d{2}'), "%d-%b-%Y %H:%M"),
 (re.compile(r'\d{4}-\d+-\d+ \d+:\d{2}:\d{2}'), "%Y-%m-%d %H:%M:%S"),
+(RE_ISO8601, "%Y-%m-%dT%H:%M:%SZ"),
 (re.compile(r'\d{4}-\d+-\d+ \d+:\d{2}'), "%Y-%m-%d %H:%M"),
 (re.compile(r'\d{4}-[A-S][a-y]{2}-\d+ \d+:\d{2}:\d{2}'), "%Y-%b-%d %H:%M:%S"),
 (re.compile(r'\d{4}-[A-S][a-y]{2}-\d+ \d+:\d{2}'), "%Y-%b-%d %H:%M"),
 (re.compile(r'[F-W][a-u]{2} [A-S][a-y]{2} +\d+ \d{2}:\d{2}:\d{2} \d{4}'), "%a %b %d %H:%M:%S %Y"),
+(re.compile(r'[F-W][a-u]{2}, \d+ [A-S][a-y]{2} \d{4} \d{2}:\d{2}:\d{2} .+'), "%a, %d %b %Y %H:%M:%S %Z"),
 (re.compile(r'\d{4}-\d+-\d+'), "%Y-%m-%d"),
-(re.compile(r'\d+/\d+/\d{4} \d{2}:\d{2}:\d{2} [+-]\d{4}'), "%d/%m/%Y %H:%M:%S %z")
+(re.compile(r'\d+/\d+/\d{4} \d{2}:\d{2}:\d{2} [+-]\d{4}'), "%d/%m/%Y %H:%M:%S %z"),
+(re.compile(r'\d{2} [A-S][a-y]{2} \d{4}'), "%d %b %Y")
 )
 
 RE_FILESIZE = re.compile(r'\d+(\.\d+)? ?[BKMGTPEZY]|\d+|-', re.I)
@@ -50,6 +55,10 @@ def human2bytes(s):
             prefix[s] = 1 << (i+1)*10
         return int(num * prefix[letter])
 
+def aherf2filename(a_href):
+    isdir = ('/' if a_href[-1] == '/' else '')
+    return os.path.basename(urllib.parse.unquote(a_href.rstrip('/'))) + isdir
+
 def parse(soup):
     '''
     Try to parse apache/nginx-style directory listing with all kinds of tricks.
@@ -61,12 +70,12 @@ def parse(soup):
     '''
     cwd = None
     listing = []
-    if soup.title and soup.title.string.startswith('Index of '):
+    if soup.title and soup.title.string and soup.title.string.startswith('Index of '):
         cwd = soup.title.string[9:]
     elif soup.h1:
         title = soup.h1.get_text().strip()
         if title.startswith('Index of '):
-            cwd = title.string[9:]
+            cwd = title[9:]
     [img.decompose() for img in soup.find_all('img')]
     file_name = file_mod = file_size = file_desc = None
     pres = [x for x in soup.find_all('pre') if
@@ -85,7 +94,7 @@ def parse(soup):
                     if file_name:
                         listing.append(FileEntry(
                             file_name, file_mod, file_size, file_desc))
-                    file_name = urllib.parse.unquote(element['href'])
+                    file_name = aherf2filename(element['href'])
                     file_mod = file_size = file_desc = None
                 elif (element.string in ('Parent Directory', '..', '../') or
                       element['href'][0] not in '?/'):
@@ -104,7 +113,7 @@ def parse(soup):
                     if sizestr == '-':
                         file_size = None
                     else:
-                        file_size = human2bytes(sizestr.replace(' ', ''))
+                        file_size = human2bytes(sizestr.replace(' ', '').replace(',', ''))
                     line = line[match.end():].lstrip()
                 if line:
                     file_desc = line.rstrip()
@@ -124,6 +133,8 @@ def parse(soup):
                 if tr.parent.name in ('thead', 'tfoot') or tr.th:
                     continue
                 for td in tr.find_all('td'):
+                    if status >= len(heads):
+                        raise AssertionError("can't detect table column number")
                     if td.get('colspan'):
                         continue
                     elif heads[status] == 'name':
@@ -136,11 +147,15 @@ def parse(soup):
                         elif a_str == 'Parent Directory' or a_href == '../':
                             break
                         else:
-                            file_name = urllib.parse.unquote(a_href)
-                            if file_name.endswith(a_str):
-                                file_name = a_str
+                            file_name = aherf2filename(a_href)
                             status = 1
                     elif heads[status] == 'modified':
+                        if td.time:
+                            timestr = td.time.get('datetime', '')
+                            if RE_ISO8601.match(timestr):
+                                file_mod = time.strptime(timestr, "%Y-%m-%dT%H:%M:%SZ")
+                                status += 1
+                                continue
                         timestr = td.get_text().strip()
                         if timestr:
                             for regex, fmt in DATETIME_FMTs:
@@ -150,12 +165,12 @@ def parse(soup):
                             else:
                                 if td.get('data-sort-value'):
                                     file_mod = time.gmtime(int(td['data-sort-value']))
-                                else:
-                                    raise AssertionError(
-                                        "can't identify date/time format")
+                                # else:
+                                    # raise AssertionError(
+                                        # "can't identify date/time format")
                         status += 1
                     elif heads[status] == 'size':
-                        sizestr = td.get_text().strip()
+                        sizestr = td.get_text().strip().replace(',', '')
                         if sizestr == '-' or not sizestr:
                             file_size = None
                         elif td.get('data-sort-value'):
@@ -183,7 +198,11 @@ def parse(soup):
                 continue
             elif tr.find(string=RE_COMMONHEAD):
                 namefound = False
+                colspan = False
                 for th in (tr.find_all('th') if tr.th else tr.find_all('td')):
+                    if th.get('colspan'):
+                        colspan = True
+                        continue
                     name = th.get_text().strip(' \t\n\r\x0b\x0c\xa0↑↓').lower()
                     if not name:
                         continue
@@ -200,7 +219,8 @@ def parse(soup):
                         heads.append('signature')
                     else:
                         heads.append('description')
-                # print(heads)
+                if colspan:
+                    continue
                 if not heads:
                     heads = ('name', 'modified', 'size', 'description')
                 elif not namefound:

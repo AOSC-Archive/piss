@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import time
+import socket
 import sqlite3
 import logging
 import argparse
@@ -20,6 +21,7 @@ from htmllistparse import parse as parse_listing
 import bs4
 import ftputil
 import requests
+import feedparser
 import dateutil.parser
 
 __version__ = '1.0'
@@ -36,14 +38,29 @@ RE_ALPHA = re.compile("[A-Za-z]")
 RE_SRCHOST = re.compile(r'^https://(github\.com|bitbucket\.org|gitlab\.com)')
 RE_PYPI = re.compile(r'^https?://pypi\.(python\.org|io)')
 RE_PYPISRC = re.compile(r'^https?://pypi\.(python\.org|io)/packages/source/')
-RE_VER_PREFIX = re.compile(r'^(?:version|ver|v|release|rel|r)', re.I)
-RE_TARBALL = re.compile(r'^(.+)[._-][vr]?(\d.*?)(?:[.-_](?:orig|src))?(\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip)$', re.I)
-RE_TARBALL_GROUP = lambda s: re.compile(r'\b(' + re.escape(s) + r'[._-][vr]?(?:\d.*?)(?:[.-_](?:orig|src))?(?:\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip))\b', re.I)
-RE_BINARY = re.compile('(linux32|linux64|win32|win64|osx|x86|i.86|x64|amd64|arm64|armhf|armel|mips|ppc|powerpc|s390x)', re.I)
+RE_VER_PREFIX = re.compile(r'^(?:version|ver|v|release|rel|r)[._-]?', re.I)
+RE_TARBALL = re.compile(r'^(.+?)[._-][vr]?(\d.*?)(?:[._-](?:orig|src))?(\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip|\.gem)$', re.I)
+RE_TARBALL_GROUP = lambda s: re.compile(r'\b(' + re.escape(s) + r'[._-][vr]?(?:\d.*?)(?:[._-](?:orig|src))?(?:\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip))\b', re.I)
+RE_BINARY = re.compile('(linux32|linux64|win32|win64|w32|w64|mingw|osx|x86|i.86|x64|amd64|arm64|armhf|armel|mips|ppc|powerpc|s390x)', re.I)
 RE_VER_MINOR = re.compile(r'\d+\.\d+$')
+RE_CGIT_TAGS = re.compile(r'/tag/\?h=|refs/tags/')
+
+RE_ALPHAPREFIX = re.compile("^[A-Za-z_.-]{5,}")
 
 COMMON_EXT = frozenset(('.gz', '.bz2', '.xz', '.tar', '.7z', '.rar', '.zip', '.tgz', '.tbz', '.txz'))
+CGIT_SITES = frozenset((
+'git.kernel.org',
+'git.zx2c4.com',
+'git.gnome.org',
+'git.deluge-torrent.org',
+'git.netsurf-browser.org',
+'git.archlinux.org',
+'git.torproject.org',
+'git.opensvc.com',
+'repo.or.cz',
+))
 
+socket.setdefaulttimeout(30)
 
 strptime_iso = lambda s: int(dateutil.parser.parse(s).timestamp())
 
@@ -124,7 +141,7 @@ def tarball_maxver(tbllist, name=None):
     for t in tbllist:
         if not (lname and t.filename.lower().startswith(lname)):
             continue
-        if RE_BINARY.match(t.filename):
+        if RE_BINARY.search(t.filename):
             continue
         match = RE_TARBALL.match(t.filename)
         if not match:
@@ -135,10 +152,14 @@ def tarball_maxver(tbllist, name=None):
     ver = max(tblversions.keys(), key=version_compare_key)
     return ver, tblversions[ver]
 
-def tag_maxver(taglist):
+def tag_maxver(taglist, prefix=None):
     versions = {}
     for tag in taglist:
         ver = RE_VER_PREFIX.sub('', tag.name)
+        if prefix:
+            ver = re.sub('^' + re.escape(prefix) + '[._-]', '', ver, flags=re.I)
+        if RE_ALPHAPREFIX.match(ver):
+            continue
         versions[ver] = tag
     if not versions:
         return None, None
@@ -158,7 +179,7 @@ def remove_package_version(name, url, version):
     return '/'.join(newurlpspl) + '/'
 
 def html_select(url, selector, regex):
-    req = HSESSION.get(url, timeout=30)
+    req = HSESSION.get(url, timeout=20)
     req.raise_for_status()
     soup = bs4.BeautifulSoup(req.content, 'html5lib')
     tags = soup.select(selector)
@@ -176,25 +197,23 @@ def html_select(url, selector, regex):
     return max(versions, key=version_compare_key)
 
 def check_github(package, repo):
-    # FIXME: use atom feed to bypass rate limit
-    fetch_time = int(time.time())
-    req = HSESSION.get(
-        'https://api.github.com/repos/%s/tags' % repo, timeout=30)
-    req.raise_for_status()
-    d = req.json()
+    feed = feedparser.parse('https://github.com/%s/releases.atom' % repo)
     tags = []
-    for row in d:
-        tags.append(SCMTag(row['name'], fetch_time, row['commit']['url']))
-    ver, tag = tag_maxver(tags)
+    for e in feed.entries:
+        evt_time = int(calendar.timegm(e.updated_parsed))
+        tags.append(SCMTag(e.link.split('/')[-1], evt_time, e.link))
+    ver, tag = tag_maxver(tags, repo.split('/')[-1])
+    if not ver:
+        return
     url = 'https://github.com/%s/releases' % repo
-    return Release(package, 'github', ver, fetch_time, url)
+    return Release(package, 'github', ver, tag.updated, tag.desc)
 
-def check_bitbucket(package, repo, updtype):
+def check_bitbucket(package, repo, updtype, prefix):
     if updtype == 'downloads':
         url = 'https://api.bitbucket.org/2.0/repositories/%s/downloads' % repo
     else:
         url = 'https://api.bitbucket.org/2.0/repositories/%s/refs/tags' % repo
-    req = HSESSION.get(url, timeout=30)
+    req = HSESSION.get(url, timeout=20)
     req.raise_for_status()
     d = req.json()
     if updtype == 'downloads':
@@ -202,7 +221,7 @@ def check_bitbucket(package, repo, updtype):
         for row in d['values']:
             tarballs.append(Tarball(
                 row['name'], strptime_iso(row['created_on']), None))
-        ver, tbl = tarball_maxver(tarballs)
+        ver, tbl = tarball_maxver(tarballs, prefix)
         if not ver:
             return None
         url = 'https://bitbucket.org/%s/downloads/' % repo
@@ -210,9 +229,10 @@ def check_bitbucket(package, repo, updtype):
     else:
         tags = []
         for row in d['values']:
+            upd = strptime_iso(row['date'] or row['target']['date'])
             tags.append(SCMTag(
-                row['name'], strptime_iso(row['date']), row['links']['html']['href']))
-        ver, tag = tag_maxver(tags)
+                row['name'], upd, row['links']['html']['href']))
+        ver, tag = tag_maxver(tags, prefix or repo.split('/')[-1])
         if not ver:
             return None
         return Release(package, 'bitbucket', ver, tag.updated, tag.desc)
@@ -220,60 +240,122 @@ def check_bitbucket(package, repo, updtype):
 def check_gitlab(package, repo):
     req = HSESSION.get(
         'https://gitlab.com/api/v4/projects/%s/repository/tags' %
-        repo.replace('/', '%2F'), timeout=30)
+        repo.replace('/', '%2F'), timeout=20)
     req.raise_for_status()
     d = req.json()
     tags = []
     for tag in d:
         upd = strptime_iso(tag['commit']['committed_date'])
         tags.append(SCMTag(tag['name'], upd, None))
-    ver, tag = tag_maxver(tags)
+    ver, tag = tag_maxver(tags, repo.split('/')[-1])
+    if not ver:
+        return
     url = 'https://gitlab.com/%s/tags/%s' % (repo, tag.name)
     return Release(package, 'gitlab', ver, tag.updated, url)
 
 def check_pypi(package, pypiname):
-    req = HSESSION.get('https://pypi.python.org/pypi/%s/json' % pypiname, timeout=30)
+    req = HSESSION.get('https://pypi.python.org/pypi/%s/json' % pypiname, timeout=20)
     req.raise_for_status()
     d = req.json()
     ver = d['info']['version']
     upd = strptime_iso(d['releases'][ver][0]['upload_time'])
     return Release(package, 'pypi', ver, upd, d['info']['release_url'])
 
+def check_rubygems(package, gemname):
+    fetch_time = int(time.time())
+    req = HSESSION.get('https://rubygems.org/api/v1/gems/%s.json' % gemname, timeout=20)
+    req.raise_for_status()
+    d = req.json()
+    return Release(package, 'rubygems', d['version'], fetch_time, d['project_uri'])
+
+def check_npm(package, npmname):
+    req = HSESSION.get('https://registry.npmjs.org/%s/' % npmname, timeout=20)
+    req.raise_for_status()
+    d = req.json()
+    ver = d['dist-tags']['latest']
+    upd = strptime_iso(d['time'][ver])
+    url = 'https://www.npmjs.com/package/' + npmname
+    return Release(package, 'npm', ver, upd, url)
+
+def check_cgit(package, url, project):
+    fetch_time = int(time.time())
+    req = HSESSION.get(url, timeout=20)
+    req.raise_for_status()
+    soup = bs4.BeautifulSoup(req.content, 'html5lib')
+    generatortag = soup.find('meta', attrs={'name': 'generator'})
+    tags = []
+    links = soup.find_all('a', href=RE_CGIT_TAGS)
+    if 'cgit' in generatortag['content']:
+        generator = 'cgit'
+        for link in links:
+            href = link['href']
+            ver = href[RE_CGIT_TAGS.search(href).end():]
+            span = link.parent.parent.find('span', title=True)
+            if not span:
+                continue
+            upd = strptime_iso(span['title'])
+            tags.append(SCMTag(ver, upd, url))
+    elif 'gitweb' in generatortag['content']:
+        generator = 'gitweb'
+        for link in links:
+            href = link['href']
+            ver = href[RE_CGIT_TAGS.search(href).end():]
+            tags.append(SCMTag(ver, fetch_time, url))
+    else:
+        return
+    ver, tag = tag_maxver(tags, project)
+    if not ver:
+        return
+    return Release(package, generator, ver, tag.updated, url)
+
 def check_launchpad(package, project):
-    req = HSESSION.get('https://api.launchpad.net/1.0/%s/releases' % project, timeout=30)
+    req = HSESSION.get('https://api.launchpad.net/1.0/%s/releases' % project, timeout=20)
     req.raise_for_status()
     d = req.json()
     tags = []
     for tag in d['entries']:
         upd = strptime_iso(tag['date_released'])
         tags.append(SCMTag(tag['version'], upd, tag['web_link']))
-    ver, tag = tag_maxver(tags)
+    ver, tag = tag_maxver(tags, project)
+    if not ver:
+        return
     return Release(package, 'launchpad', ver, tag.updated, tag.desc)
 
 def check_sourceforge(package, project, path, prefix):
-    return
-    url = 'https://sourceforge.mirrorservice.org/%s/%s/%s/%s' % (
-        project[0], project[:2], project, path.lstrip('/'))
-    return check_dirlisting(package, url, prefix, False)
+    feed = feedparser.parse(
+        'https://sourceforge.net/projects/%s/rss?path=%s' % (project, path))
+    tarballs = []
+    for e in feed.entries:
+        filepath = e.title
+        evt_time = int(calendar.timegm(e.published_parsed))
+        tarballs.append(Tarball(filepath.split('/')[-1], evt_time, e.link))
+    ver, tbl = tarball_maxver(tarballs, prefix)
+    if not ver:
+        return
+    return Release(package, 'sourceforge', ver, tbl.updated, tbl.desc)
 
 def check_dirlisting(package, url, prefix, try_html=True):
     fetch_time = int(time.time())
-    req = HSESSION.get(url, timeout=30)
+    req = HSESSION.get(url, timeout=20)
     req.raise_for_status()
     if len(req.content) > 50*1024*1024:
         raise ValueError('Webpage too large: ' + url)
     soup = bs4.BeautifulSoup(req.content, 'html5lib')
-    cwd, entries = parse_listing(soup)
-    tarballs = []
-    for entry in entries:
-        if entry.modified:
-            upd = int(calendar.timegm(entry.modified))
-        else:
-            upd = fetch_time
-        tarballs.append(Tarball(entry.name, upd, None))
-    ver, tbl = tarball_maxver(tarballs, prefix)
-    if ver:
-        return Release(package, 'dirlist', ver, tbl.updated, url)
+    try:
+        cwd, entries = parse_listing(soup)
+    except Exception:
+        cwd, entries = None, []
+    if entries:
+        tarballs = []
+        for entry in entries:
+            if entry.modified:
+                upd = int(calendar.timegm(entry.modified))
+            else:
+                upd = fetch_time
+            tarballs.append(Tarball(entry.name, upd, None))
+        ver, tbl = tarball_maxver(tarballs, prefix)
+        if ver:
+            return Release(package, 'dirlist', ver, tbl.updated, url)
     if not try_html or prefix is None:
         return
     tarballs = []
@@ -316,17 +398,28 @@ def detect_upstream(name, srctype, url, version=None):
         repo = '/'.join(pathseg[:2])
         if repo.endswith('.git'):
             repo = repo[:-4]
+        match = RE_TARBALL.match(urlp.path.split('/')[-1])
+        if match:
+            prefix = match.group(1)
+        else:
+            prefix = None
         if len(pathseg) > 2:
             if pathseg[2] == 'downloads':
-                return 'bitbucket', repo, 'downloads'
+                return 'bitbucket', repo, 'downloads', prefix
             # pathseg[2] == 'get'
-        return 'bitbucket', repo, 'tag'
+        return 'bitbucket', repo, 'tag', prefix
     elif urlp.netloc in ('pypi.io', 'pypi.python.org'):
         if RE_PYPISRC.match(url):
             pypiname = urlp.path.split('/')[-2]
         else:
             pypiname = urlp.path.split('/')[-1].rsplit('-', 1)[0]
         return 'pypi', pypiname
+    elif urlp.netloc in ('rubygems.org', 'gems.rubyforge.org'):
+        gemname = RE_TARBALL.match(urlp.path.split('/')[-1]).group(1)
+        return 'rubygems', gemname
+    elif urlp.netloc == 'registry.npmjs.org':
+        projname = urlp.path.strip('/').split('/')[0]
+        return 'npm', projname
     elif urlp.netloc == 'launchpad.net':
         projname = urlp.path.strip('/').split('/')[0]
         projnl = projname.lower()
@@ -334,17 +427,31 @@ def detect_upstream(name, srctype, url, version=None):
             return 'launchpad', projname
     elif urlp.scheme == 'ftp':
         newurlp = list(urlp)
-        filename = None
-        if urlp.path[-1] != '/':
-            newurlp[2], filename = os.path.split(urlp.path)
-            if newurlp[2] != '/':
-                newurlp[2] += '/'
+        newurlp[2], filename = os.path.split(urlp.path)
+        if newurlp[2] != '/':
+            newurlp[2] += '/'
         if version:
             newurlp[2] = remove_package_version(name, newurlp[2], version)
         newurl = urllib.parse.urlunparse(newurlp)
-        fnmatch = RE_TARBALL.match(urlp.path.split('/')[-1])
+        fnmatch = RE_TARBALL.match(filename)
+        if fnmatch is None:
+            return
         return 'ftp', newurl, fnmatch.group(1)
-    elif urlp.path.rstrip('/').endswith('.git') or srctype != 'SRCTBL':
+    elif ('cgit' in url or (srctype == 'GITSRC' or 'git' in url)
+          and (urlp.netloc in CGIT_SITES or '/snapshot/' in urlp.path)):
+        newurlp = list(urlp)
+        if urlp.scheme == 'git':
+            newurlp[0] = 'http'
+        idx = urlp.path.find('/snapshot/')
+        if idx != -1:
+            newurlp[2] = newurlp[2][:idx+1]
+        newurl = urllib.parse.urlunparse(newurlp).split(';')[0]
+        project = newurlp[2].rstrip('/')
+        if project.endswith('.git'):
+            project = project[:-4].rstrip('/')
+        project = project.split('/')[-1]
+        return 'cgit', newurl, project
+    elif srctype != 'SRCTBL':
         return
     elif urlp.scheme in ('http', 'https'):
         newurlp = list(urlp)
@@ -423,20 +530,29 @@ UPSTRAM_TYPES = {
     'bitbucket': check_bitbucket,
     'gitlab': check_gitlab,
     'pypi': check_pypi,
+    'rubygems': check_rubygems,
+    'npm': check_npm,
+    'cgit': check_cgit,
     'launchpad': check_launchpad,
     'sourceforge': check_sourceforge,
     'dirlist': check_dirlisting,
     'ftp': check_ftp,
 }
 
+def check_auto(name, srctype, srcurl, version):
+    upstream = detect_upstream(name, srctype, srcurl, version)
+    return UPSTRAM_TYPES[upstream[0]](name, *upstream[1:])
+
 def check_updates(abbsdbfile, dbfile):
     abbsdb = sqlite3.connect(abbsdbfile)
     pkglist = abbsdb.execute(SQL_PACKAGE_SRC).fetchall()
     db = init_db(dbfile)
     cur = db.cursor()
+    now = int(time.time())
     delayed = set(x[0] for x in cur.execute(
-        'SELECT package FROM upstream_status WHERE last_try + 7200 > ?',
-        (int(time.time()),)))
+        "SELECT package FROM upstream_status "
+        "WHERE (last_try + 86400 > ? AND (err='not found' OR err LIKE 'HTTPError%')) "
+        "OR last_try + 7200 > ?", (now, now)))
     for name, srctype, srcurl, version in pkglist:
         if not srctype or name in delayed:
             continue

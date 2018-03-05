@@ -16,7 +16,7 @@ API_ENDPOINT = os.environ.get('API_ENDPOINT', 'https://release-monitoring.org/ap
 re_projectrep = re.compile(r'^[^/]+/|[. _-]')
 
 def anitya_api(method, **params):
-    req = requests.get(API_ENDPOINT + method, params=params, timeout=45)
+    req = requests.get(API_ENDPOINT + method, params=params, timeout=300)
     req.raise_for_status()
     return json.loads(req.content.decode('utf-8'))
 
@@ -52,7 +52,7 @@ def check_update(cur):
             int(project['updated_on']), int(project['created_on'])
         ))
 
-def detect_links(cur):
+def detect_links(cur, abbsdbfile):
     projects = cur.execute(
         'SELECT min(id) id, name FROM anitya_projects'
         ' GROUP BY name ORDER BY id').fetchall()
@@ -62,7 +62,8 @@ def detect_links(cur):
         if name_index not in project_index:
             project_index[name_index] = row
     links = {}
-    for row in cur.execute('SELECT name FROM packages ORDER BY name'):
+    abbsdb = sqlite3.connect(abbsdbfile)
+    for row in abbsdb.execute('SELECT name FROM packages ORDER BY name'):
         name = row[0]
         name_index = name.lower().replace('-', '').replace(' ', '').replace('_', '')
         if name_index in project_index:
@@ -70,7 +71,7 @@ def detect_links(cur):
     for k, v in links.items():
         cur.execute('REPLACE INTO anitya_link VALUES (?,?)', (k, v[0]))
 
-def update_db(database, reset=False):
+def update_db(database, abbsdbfile, reset=False):
     db = sqlite3.connect(database)
     cur = db.cursor()
     if reset:
@@ -79,7 +80,7 @@ def update_db(database, reset=False):
         cur.execute('VACUUM')
     init_db(cur)
     check_update(cur)
-    detect_links(cur)
+    detect_links(cur, abbsdbfile)
     cur.execute('PRAGMA optimize')
     db.commit()
 
@@ -87,11 +88,11 @@ def main():
     parser = argparse.ArgumentParser(description="Store and process project versions from Anitya.")
     parser.add_argument("-d", "--detect", help="Auto detect links", action='store_true')
     parser.add_argument("--reset", help="Reset database", action='store_true')
-    parser.add_argument("database", help="Abbs database file (abbs.db)")
-    parser.add_argument("linkconfig", help="Anitya links ini file")
+    parser.add_argument("abbsdb", help="Abbs database file (abbs.db)")
+    parser.add_argument("database", help="PISS database file")
     args = parser.parse_args()
 
-    update_db(args.database, args.reset)
+    update_db(args.database, args.abbsdb, args.reset)
     print('Done.')
 
 if __name__ == '__main__':

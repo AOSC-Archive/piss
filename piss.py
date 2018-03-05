@@ -15,7 +15,6 @@ import functools
 import collections
 import urllib.parse
 
-import anitya
 from htmllistparse import parse as parse_listing
 
 import bs4
@@ -46,6 +45,7 @@ RE_VER_MINOR = re.compile(r'\d+\.\d+$')
 RE_CGIT_TAGS = re.compile(r'/tag/\?h=|refs/tags/')
 
 RE_ALPHAPREFIX = re.compile("^[A-Za-z_.-]{5,}")
+RE_VERSION = re.compile(r"\d+\.\d+|\d{3,}")
 
 COMMON_EXT = frozenset(('.gz', '.bz2', '.xz', '.tar', '.7z', '.rar', '.zip', '.tgz', '.tbz', '.txz'))
 CGIT_SITES = frozenset((
@@ -155,10 +155,11 @@ def tarball_maxver(tbllist, name=None):
 def tag_maxver(taglist, prefix=None):
     versions = {}
     for tag in taglist:
-        ver = RE_VER_PREFIX.sub('', tag.name)
         if prefix:
-            ver = re.sub('^' + re.escape(prefix) + '[._-]', '', ver, flags=re.I)
-        if RE_ALPHAPREFIX.match(ver):
+            ver = re.sub('^' + re.escape(prefix) + '[._-]', '',
+                         tag.name, flags=re.I)
+        ver = RE_VER_PREFIX.sub('', ver)
+        if not RE_VERSION.match(ver):
             continue
         versions[ver] = tag
     if not versions:
@@ -212,11 +213,11 @@ def check_bitbucket(package, repo, updtype, prefix):
     if updtype == 'downloads':
         url = 'https://api.bitbucket.org/2.0/repositories/%s/downloads' % repo
     else:
-        url = 'https://api.bitbucket.org/2.0/repositories/%s/refs/tags' % repo
+        url = 'https://bitbucket.org/%s/downloads/?tab=tags' % repo
     req = HSESSION.get(url, timeout=20)
     req.raise_for_status()
-    d = req.json()
     if updtype == 'downloads':
+        d = req.json()
         tarballs = []
         for row in d['values']:
             tarballs.append(Tarball(
@@ -227,11 +228,14 @@ def check_bitbucket(package, repo, updtype, prefix):
         url = 'https://bitbucket.org/%s/downloads/' % repo
         return Release(package, 'bitbucket', ver, tbl.updated, url)
     else:
+        # the api doesn't sort by time and has multiple pages
+        soup = bs4.BeautifulSoup(req.content, 'html5lib')
+        tbody = soup.find('div', id='tag-pjax-container').table.tbody
         tags = []
-        for row in d['values']:
-            upd = strptime_iso(row['date'] or row['target']['date'])
-            tags.append(SCMTag(
-                row['name'], upd, row['links']['html']['href']))
+        for tr in tbody.find_all('tr', class_='iterable-item'):
+            tag = tr.find('td', class_='name').get_text().strip()
+            upd = strptime_iso(tr.find('td', class_='date').time['datetime'])
+            tags.append(SCMTag(tag, upd, url))
         ver, tag = tag_maxver(tags, prefix or repo.split('/')[-1])
         if not ver:
             return None
@@ -340,6 +344,8 @@ def check_dirlisting(package, url, prefix, try_html=True):
     req.raise_for_status()
     if len(req.content) > 50*1024*1024:
         raise ValueError('Webpage too large: ' + url)
+    elif req.headers.get('Content-Disposition', '').startswith('attachment'):
+        return
     soup = bs4.BeautifulSoup(req.content, 'html5lib')
     try:
         cwd, entries = parse_listing(soup)
@@ -592,8 +598,9 @@ def main(argv):
     parser.add_argument('db', help='PISS database file')
     args = parser.parse_args(argv)
 
+    logging.info('Checking updates...')
     check_updates(args.abbsdb, args.db)
-    anitya.update_db(args.db)
+    logging.info('Done.')
     return 0
 
 if __name__ == '__main__':

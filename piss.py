@@ -594,7 +594,7 @@ def check_updates(abbsdbfile, dbfile):
     now = int(time.time())
     delayed = set(x[0] for x in cur.execute(
         "SELECT package FROM upstream_status "
-        "WHERE (last_try + 86400 > ? AND (err='not found' OR err LIKE 'HTTPError%')) "
+        "WHERE (last_try + 86400*3 > ? AND (err='not found' OR err LIKE 'HTTPError%')) "
         "OR last_try + 7200 > ?", (now, now)))
     for name, srctype, srcurl, version in pkglist:
         if not srctype or name in delayed:

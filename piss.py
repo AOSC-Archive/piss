@@ -3,6 +3,7 @@
 
 import os
 import re
+import gc
 import sys
 import time
 import socket
@@ -39,7 +40,7 @@ RE_PYPI = re.compile(r'^https?://pypi\.(python\.org|io)')
 RE_PYPISRC = re.compile(r'^https?://pypi\.(python\.org|io)/packages/source/')
 RE_VER_PREFIX = re.compile(r'^(?:version|ver|v|releases|release|rel|r)[._/-]?', re.I)
 RE_TARBALL = re.compile(r'^(.+?)[._-][vr]?(\d.*?)(?:[._-](?:orig|src|source))?(\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip|\.gem)$', re.I)
-RE_TARBALL_GROUP = lambda s: re.compile(r'\b(' + re.escape(s) + r'[._-][vr]?(?:\d.*?)(?:[._-](?:orig|src|source))?(?:\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip))\b', re.I)
+RE_TARBALL_GROUP = lambda s: re.compile(r'\b(' + (re.escape(s) if s else '(.+?)') + r'[._-][vr]?(?:\d.*?)(?:[._-](?:orig|src|source))?(?:\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip))\b', re.I)
 RE_BINARY = re.compile('[._+-](linux32|linux64|windows|win32|win64|w32|w64|mingw|msvc|mac|osx|x86|i.86|x64|amd64|arm64|armhf|armel|mips|ppc|powerpc|s390x|portable|dbgsym)', re.I)
 RE_VER_MINOR = re.compile(r'\d+\.\d+$')
 RE_CGIT_TAGS = re.compile(r'/tag/\?h=|refs/tags/')
@@ -369,6 +370,14 @@ def check_sourceforge(package, origversion, project, path, prefix):
         return
     return Release(package, 'sourceforge', ver, tbl.updated, tbl.desc)
 
+def _check_html(package, origversion, url, prefix, content, fetch_time):
+    tarballs = []
+    for entry in RE_TARBALL_GROUP(prefix).findall(content):
+        tarballs.append(Tarball(entry, fetch_time, None))
+    ver, tbl = tarball_maxver(tarballs, prefix, origversion)
+    if ver:
+        return Release(package, 'html', ver, tbl.updated, url)
+
 def check_dirlisting(package, origversion, url, prefix, try_html=True):
     fetch_time = int(time.time())
     req = HSESSION.get(url, timeout=20)
@@ -379,6 +388,9 @@ def check_dirlisting(package, origversion, url, prefix, try_html=True):
         return
     elif len(req.content) > 50*1024*1024:
         raise ValueError('Webpage too large: ' + url)
+    elif len(req.content) > 1024*1024:
+        return _check_html(package, origversion, url, prefix,
+            req.content.decode('utf-8', errors='ignore'), fetch_time)
     soup = bs4.BeautifulSoup(req.content, 'html5lib')
     try:
         cwd, entries = parse_listing(soup)
@@ -397,12 +409,7 @@ def check_dirlisting(package, origversion, url, prefix, try_html=True):
             return Release(package, 'dirlist', ver, tbl.updated, url)
     if not try_html or prefix is None:
         return
-    tarballs = []
-    for entry in RE_TARBALL_GROUP(prefix).findall(str(soup)):
-        tarballs.append(Tarball(entry, fetch_time, None))
-    ver, tbl = tarball_maxver(tarballs, prefix, origversion)
-    if ver:
-        return Release(package, 'html', ver, tbl.updated, url)
+    return _check_html(package, origversion, url, prefix, str(soup), fetch_time)
 
 def check_ftp(package, origversion, url, prefix):
     urlp = urllib.parse.urlparse(url)
@@ -627,6 +634,7 @@ def check_updates(abbsdbfile, dbfile):
             # print(release)
             cur.execute('REPLACE INTO package_upstream VALUES (?,?,?,?,?)', release)
         db.commit()
+        gc.collect()
     cur.execute('PRAGMA optimize')
 
 def main(argv):

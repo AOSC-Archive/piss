@@ -21,7 +21,6 @@ import bs4
 import ftputil
 import requests
 import feedparser
-import dateutil.parser
 
 __version__ = '1.0'
 
@@ -62,7 +61,7 @@ CGIT_SITES = frozenset((
 
 socket.setdefaulttimeout(30)
 
-strptime_iso = lambda s: int(dateutil.parser.parse(s).timestamp())
+strptime_iso = lambda s: int(calendar.timegm(feedparser._parse_date(s)))
 
 HSESSION = requests.Session()
 HSESSION.headers['User-Agent'] = USER_AGENT
@@ -201,8 +200,9 @@ def check_github(package, repo):
     feed = feedparser.parse('https://github.com/%s/releases.atom' % repo)
     tags = []
     for e in feed.entries:
+        tag = urllib.parse.unquote(e.link.split('/')[-1])
         evt_time = int(calendar.timegm(e.updated_parsed))
-        tags.append(SCMTag(e.link.split('/')[-1], evt_time, e.link))
+        tags.append(SCMTag(tag, evt_time, e.link))
     ver, tag = tag_maxver(tags, repo.split('/')[-1])
     if not ver:
         return

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import io
 import re
 import gc
 import sys
@@ -380,18 +381,25 @@ def _check_html(package, origversion, url, prefix, content, fetch_time):
 
 def check_dirlisting(package, origversion, url, prefix, try_html=True):
     fetch_time = int(time.time())
-    req = HSESSION.get(url, timeout=20)
+    req = HSESSION.get(url, stream=True, timeout=20)
     req.raise_for_status()
+    bcontent = io.BytesIO()
     if req.headers.get('Content-Disposition', '').startswith('attachment'):
         return
-    elif req.headers.get('Content-Type', '').startswith('application/x'):
+    elif req.headers.get('Content-Type', '').startswith('application/'):
         return
-    elif len(req.content) > 50*1024*1024:
-        raise ValueError('Webpage too large: ' + url)
-    elif len(req.content) > 1024*1024:
+    ctsize = 0
+    for chunk in req.iter_content(4096):
+        ctsize += len(chunk)
+        bcontent.write(chunk)
+        if ctsize > 50*1024*1024:
+            req.close()
+            raise ValueError('Response too large: ' + url)
+    content = bcontent.getvalue()
+    if ctsize > 1024*1024:
         return _check_html(package, origversion, url, prefix,
-            req.content.decode('utf-8', errors='ignore'), fetch_time)
-    soup = bs4.BeautifulSoup(req.content, 'html5lib')
+            content.decode('utf-8', errors='ignore'), fetch_time)
+    soup = bs4.BeautifulSoup(content, 'html5lib')
     try:
         cwd, entries = parse_listing(soup)
     except Exception:

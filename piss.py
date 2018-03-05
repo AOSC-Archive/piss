@@ -285,6 +285,12 @@ def check_cgit(package, url, project):
     fetch_time = int(time.time())
     req = HSESSION.get(url, timeout=20)
     req.raise_for_status()
+    if req.headers.get('Content-Disposition', '').startswith('attachment'):
+        return
+    elif req.headers.get('Content-Type', '').startswith('application/x'):
+        return
+    elif len(req.content) > 50*1024*1024:
+        raise ValueError('Webpage too large: ' + url)
     soup = bs4.BeautifulSoup(req.content, 'html5lib')
     generatortag = soup.find('meta', attrs={'name': 'generator'})
     tags = []
@@ -342,12 +348,12 @@ def check_dirlisting(package, url, prefix, try_html=True):
     fetch_time = int(time.time())
     req = HSESSION.get(url, timeout=20)
     req.raise_for_status()
-    if len(req.content) > 50*1024*1024:
-        raise ValueError('Webpage too large: ' + url)
-    elif req.headers.get('Content-Disposition', '').startswith('attachment'):
+    if req.headers.get('Content-Disposition', '').startswith('attachment'):
         return
     elif req.headers.get('Content-Type', '').startswith('application/x'):
         return
+    elif len(req.content) > 50*1024*1024:
+        raise ValueError('Webpage too large: ' + url)
     soup = bs4.BeautifulSoup(req.content, 'html5lib')
     try:
         cwd, entries = parse_listing(soup)
@@ -454,6 +460,8 @@ def detect_upstream(name, srctype, url, version=None):
         if idx != -1:
             newurlp[2] = newurlp[2][:idx+1]
         newurl = urllib.parse.urlunparse(newurlp).split(';')[0]
+        if RE_TARBALL.match(newurl.split('/')[-1]):
+            return
         project = newurlp[2].rstrip('/')
         if project.endswith('.git'):
             project = project[:-4].rstrip('/')
@@ -549,6 +557,8 @@ UPSTRAM_TYPES = {
 
 def check_auto(name, srctype, srcurl, version):
     upstream = detect_upstream(name, srctype, srcurl, version)
+    if upstream is None:
+        return
     return UPSTRAM_TYPES[upstream[0]](name, *upstream[1:])
 
 def check_updates(abbsdbfile, dbfile):

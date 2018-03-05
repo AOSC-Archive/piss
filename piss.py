@@ -346,6 +346,8 @@ def check_dirlisting(package, url, prefix, try_html=True):
         raise ValueError('Webpage too large: ' + url)
     elif req.headers.get('Content-Disposition', '').startswith('attachment'):
         return
+    elif req.headers.get('Content-Type', '').startswith('application/x'):
+        return
     soup = bs4.BeautifulSoup(req.content, 'html5lib')
     try:
         cwd, entries = parse_listing(soup)

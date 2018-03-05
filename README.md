@@ -2,25 +2,36 @@ PISS
 ====
 Project Information Storage System, an OSS project updates aggregator.
 
+This version only checks the latest version of various projects.
+
 ## Features
 
-* Automagically detect where to find news about a project's updates
+
+UPSTRAM_TYPES = {
+    'github': check_github,
+    'bitbucket': check_bitbucket,
+    'gitlab': check_gitlab,
+    'pypi': check_pypi,
+    'rubygems': check_rubygems,
+    'npm': check_npm,
+    'cgit': check_cgit,
+    'launchpad': check_launchpad,
+    'sourceforge': check_sourceforge,
+    'dirlist': check_dirlisting,
+    'ftp': check_ftp,
+
+
+* Automagically detect how to check a project's updates
   * GitHub
   * Bitbucket
-  * News feed (RSS/Atom)
+  * GitLab
+  * PyPI
+  * Rubygems
+  * NPM
+  * Launchpad
+  * Sourceforge
+  * cgit / gitweb
   * Apache/nginx style directory listing
   * FTP
-  * HTML selector
-  * _IMAP (WIP)_
+* Checks https://release-monitoring.org for comparison
 
-* Keep running or one-shot update fetching
-  * Supports HTTP ETag
-
-* Multiple output format
-  * Colorful terminal output
-  * Plain text
-  * Atom feed
-
-* Readability and durability
-  * YAML config files
-  * SQLite news and status storage

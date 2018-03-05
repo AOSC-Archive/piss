@@ -2,7 +2,4 @@ requests
 feedparser
 ftputil
 beautifulsoup4
-PyYAML
-feedgen
-MarkupSafe
-jinja2
+html5lib

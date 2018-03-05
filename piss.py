@@ -10,11 +10,11 @@ import sqlite3
 import logging
 import argparse
 import calendar
-import warnings
 import functools
 import collections
 import urllib.parse
 
+import anitya
 from htmllistparse import parse as parse_listing
 
 import bs4
@@ -33,13 +33,14 @@ USER_AGENT = 'Mozilla/5.0 (compatible; PISS/%s; +https://github.com/AOSC-Dev/pis
 RE_ALL_DIGITS_OR_NOT = re.compile("\d+|\D+")
 RE_DIGITS = re.compile("\d+")
 RE_ALPHA = re.compile("[A-Za-z]")
+RE_CHARCLASS = re.compile("([A-Za-z]+|\d+|[._+~-]+)")
 RE_SRCHOST = re.compile(r'^https://(github\.com|bitbucket\.org|gitlab\.com)')
 RE_PYPI = re.compile(r'^https?://pypi\.(python\.org|io)')
 RE_PYPISRC = re.compile(r'^https?://pypi\.(python\.org|io)/packages/source/')
-RE_VER_PREFIX = re.compile(r'^(?:version|ver|v|release|rel|r)[._-]?', re.I)
-RE_TARBALL = re.compile(r'^(.+?)[._-][vr]?(\d.*?)(?:[._-](?:orig|src))?(\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip|\.gem)$', re.I)
-RE_TARBALL_GROUP = lambda s: re.compile(r'\b(' + re.escape(s) + r'[._-][vr]?(?:\d.*?)(?:[._-](?:orig|src))?(?:\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip))\b', re.I)
-RE_BINARY = re.compile('(linux32|linux64|win32|win64|w32|w64|mingw|osx|x86|i.86|x64|amd64|arm64|armhf|armel|mips|ppc|powerpc|s390x)', re.I)
+RE_VER_PREFIX = re.compile(r'^(?:version|ver|v|releases|release|rel|r)[._/-]?', re.I)
+RE_TARBALL = re.compile(r'^(.+?)[._-][vr]?(\d.*?)(?:[._-](?:orig|src|source))?(\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip|\.gem)$', re.I)
+RE_TARBALL_GROUP = lambda s: re.compile(r'\b(' + re.escape(s) + r'[._-][vr]?(?:\d.*?)(?:[._-](?:orig|src|source))?(?:\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip))\b', re.I)
+RE_BINARY = re.compile('[._+-](linux32|linux64|windows|win32|win64|w32|w64|mingw|msvc|mac|osx|x86|i.86|x64|amd64|arm64|armhf|armel|mips|ppc|powerpc|s390x|portable|dbgsym)', re.I)
 RE_VER_MINOR = re.compile(r'\d+\.\d+$')
 RE_CGIT_TAGS = re.compile(r'/tag/\?h=|refs/tags/')
 
@@ -71,6 +72,8 @@ class Release(collections.namedtuple(
     def __new__(cls, package, upstreamtype, version, updated, url):
         ver = RE_VER_PREFIX.sub('', version)
         ver = re.sub('^' + re.escape(package) + '[._-]', '', ver)
+        if '.' not in ver:
+            ver = ver.replace('_', '.')
         return super().__new__(cls, package, upstreamtype, ver, updated, url)
 
 Tarball = collections.namedtuple('Tarball', 'filename updated desc')
@@ -134,8 +137,27 @@ def version_compare(a, b):
 
 version_compare_key = functools.cmp_to_key(version_compare)
 
-def tarball_maxver(tbllist, name=None):
+def version_format(version):
+    if not version:
+        return re.compile('')
+    ret = []
+    for s in RE_CHARCLASS.split(version):
+        if not s:
+            pass
+        elif s.isdigit():
+            if len(s) < 3:
+                ret.append(r'\d+')
+            else:
+                ret.append(r'\d{3,}')
+        elif s.isalpha():
+            ret.append('[A-Za-z]+')
+        else:
+            ret.append('[._+~-]+')
+    return re.compile('^' + ''.join(ret))
+
+def tarball_maxver(tbllist, name=None, origversion=None):
     lname = name and name.lower()
+    re_verfmt = version_format(origversion)
     tblversions = {}
     for t in tbllist:
         if not (lname and t.filename.lower().startswith(lname)):
@@ -145,14 +167,19 @@ def tarball_maxver(tbllist, name=None):
         match = RE_TARBALL.match(t.filename)
         if not match:
             continue
-        tblversions[match.group(2)] = t
+        ver = match.group(2)
+        pfxmatch = (match.group(1) == name)
+        vermatch = bool(re_verfmt.match(ver))
+        tblversions[(pfxmatch, vermatch, ver)] = t
     if not tblversions:
         return None, None
-    ver = max(tblversions.keys(), key=version_compare_key)
-    return ver, tblversions[ver]
+    pfxmatch, vermatch, ver = max(
+        tblversions.keys(), key=lambda x: (x[0], x[1], version_compare_key(x[2])))
+    return ver, tblversions[(pfxmatch, vermatch, ver)]
 
-def tag_maxver(taglist, prefix=None):
+def tag_maxver(taglist, prefix=None, origversion=None):
     versions = {}
+    re_verfmt = version_format(origversion)
     for tag in taglist:
         if prefix:
             ver = re.sub('^' + re.escape(prefix) + '[._-]', '',
@@ -160,11 +187,11 @@ def tag_maxver(taglist, prefix=None):
         ver = RE_VER_PREFIX.sub('', ver)
         if not RE_VERSION.match(ver):
             continue
-        versions[ver] = tag
+        versions[(bool(re_verfmt.match(ver)), ver)] = tag
     if not versions:
         return None, None
-    ver = max(versions.keys(), key=version_compare_key)
-    return ver, versions[ver]
+    vermatch, ver = max(versions.keys(), key=lambda x: (x[0], version_compare_key(x[1])))
+    return ver, versions[(vermatch, ver)]
 
 def remove_package_version(name, url, version):
     newurlpspl = ['']
@@ -196,20 +223,18 @@ def html_select(url, selector, regex):
         raise EmptyContent("got nothing in '%s'." % url)
     return max(versions, key=version_compare_key)
 
-def check_github(package, repo):
+def check_github(package, origversion, repo):
     feed = feedparser.parse('https://github.com/%s/releases.atom' % repo)
     tags = []
     for e in feed.entries:
         tag = urllib.parse.unquote(e.link.split('/')[-1])
         evt_time = int(calendar.timegm(e.updated_parsed))
         tags.append(SCMTag(tag, evt_time, e.link))
-    ver, tag = tag_maxver(tags, repo.split('/')[-1])
-    if not ver:
-        return
-    url = 'https://github.com/%s/releases' % repo
-    return Release(package, 'github', ver, tag.updated, tag.desc)
+    ver, tag = tag_maxver(tags, repo.split('/')[-1], origversion)
+    if ver:
+        return Release(package, 'github', ver, tag.updated, tag.desc)
 
-def check_bitbucket(package, repo, updtype, prefix):
+def check_bitbucket(package, origversion, repo, updtype, prefix):
     if updtype == 'downloads':
         url = 'https://api.bitbucket.org/2.0/repositories/%s/downloads' % repo
     else:
@@ -222,7 +247,7 @@ def check_bitbucket(package, repo, updtype, prefix):
         for row in d['values']:
             tarballs.append(Tarball(
                 row['name'], strptime_iso(row['created_on']), None))
-        ver, tbl = tarball_maxver(tarballs, prefix)
+        ver, tbl = tarball_maxver(tarballs, prefix, origversion)
         if not ver:
             return None
         url = 'https://bitbucket.org/%s/downloads/' % repo
@@ -236,12 +261,12 @@ def check_bitbucket(package, repo, updtype, prefix):
             tag = tr.find('td', class_='name').get_text().strip()
             upd = strptime_iso(tr.find('td', class_='date').time['datetime'])
             tags.append(SCMTag(tag, upd, url))
-        ver, tag = tag_maxver(tags, prefix or repo.split('/')[-1])
+        ver, tag = tag_maxver(tags, prefix or repo.split('/')[-1], origversion)
         if not ver:
             return None
         return Release(package, 'bitbucket', ver, tag.updated, tag.desc)
 
-def check_gitlab(package, repo):
+def check_gitlab(package, origversion, repo):
     req = HSESSION.get(
         'https://gitlab.com/api/v4/projects/%s/repository/tags' %
         repo.replace('/', '%2F'), timeout=20)
@@ -251,13 +276,13 @@ def check_gitlab(package, repo):
     for tag in d:
         upd = strptime_iso(tag['commit']['committed_date'])
         tags.append(SCMTag(tag['name'], upd, None))
-    ver, tag = tag_maxver(tags, repo.split('/')[-1])
+    ver, tag = tag_maxver(tags, repo.split('/')[-1], origversion)
     if not ver:
         return
     url = 'https://gitlab.com/%s/tags/%s' % (repo, tag.name)
     return Release(package, 'gitlab', ver, tag.updated, url)
 
-def check_pypi(package, pypiname):
+def check_pypi(package, origversion, pypiname):
     req = HSESSION.get('https://pypi.python.org/pypi/%s/json' % pypiname, timeout=20)
     req.raise_for_status()
     d = req.json()
@@ -265,14 +290,14 @@ def check_pypi(package, pypiname):
     upd = strptime_iso(d['releases'][ver][0]['upload_time'])
     return Release(package, 'pypi', ver, upd, d['info']['release_url'])
 
-def check_rubygems(package, gemname):
+def check_rubygems(package, origversion, gemname):
     fetch_time = int(time.time())
     req = HSESSION.get('https://rubygems.org/api/v1/gems/%s.json' % gemname, timeout=20)
     req.raise_for_status()
     d = req.json()
     return Release(package, 'rubygems', d['version'], fetch_time, d['project_uri'])
 
-def check_npm(package, npmname):
+def check_npm(package, origversion, npmname):
     req = HSESSION.get('https://registry.npmjs.org/%s/' % npmname, timeout=20)
     req.raise_for_status()
     d = req.json()
@@ -281,7 +306,7 @@ def check_npm(package, npmname):
     url = 'https://www.npmjs.com/package/' + npmname
     return Release(package, 'npm', ver, upd, url)
 
-def check_cgit(package, url, project):
+def check_cgit(package, origversion, url, project):
     fetch_time = int(time.time())
     req = HSESSION.get(url, timeout=20)
     req.raise_for_status()
@@ -313,12 +338,12 @@ def check_cgit(package, url, project):
             tags.append(SCMTag(ver, fetch_time, url))
     else:
         return
-    ver, tag = tag_maxver(tags, project)
+    ver, tag = tag_maxver(tags, project, origversion)
     if not ver:
         return
     return Release(package, generator, ver, tag.updated, url)
 
-def check_launchpad(package, project):
+def check_launchpad(package, origversion, project):
     req = HSESSION.get('https://api.launchpad.net/1.0/%s/releases' % project, timeout=20)
     req.raise_for_status()
     d = req.json()
@@ -326,12 +351,12 @@ def check_launchpad(package, project):
     for tag in d['entries']:
         upd = strptime_iso(tag['date_released'])
         tags.append(SCMTag(tag['version'], upd, tag['web_link']))
-    ver, tag = tag_maxver(tags, project)
+    ver, tag = tag_maxver(tags, project, origversion)
     if not ver:
         return
     return Release(package, 'launchpad', ver, tag.updated, tag.desc)
 
-def check_sourceforge(package, project, path, prefix):
+def check_sourceforge(package, origversion, project, path, prefix):
     feed = feedparser.parse(
         'https://sourceforge.net/projects/%s/rss?path=%s' % (project, path))
     tarballs = []
@@ -339,12 +364,12 @@ def check_sourceforge(package, project, path, prefix):
         filepath = e.title
         evt_time = int(calendar.timegm(e.published_parsed))
         tarballs.append(Tarball(filepath.split('/')[-1], evt_time, e.link))
-    ver, tbl = tarball_maxver(tarballs, prefix)
+    ver, tbl = tarball_maxver(tarballs, prefix, origversion)
     if not ver:
         return
     return Release(package, 'sourceforge', ver, tbl.updated, tbl.desc)
 
-def check_dirlisting(package, url, prefix, try_html=True):
+def check_dirlisting(package, origversion, url, prefix, try_html=True):
     fetch_time = int(time.time())
     req = HSESSION.get(url, timeout=20)
     req.raise_for_status()
@@ -367,7 +392,7 @@ def check_dirlisting(package, url, prefix, try_html=True):
             else:
                 upd = fetch_time
             tarballs.append(Tarball(entry.name, upd, None))
-        ver, tbl = tarball_maxver(tarballs, prefix)
+        ver, tbl = tarball_maxver(tarballs, prefix, origversion)
         if ver:
             return Release(package, 'dirlist', ver, tbl.updated, url)
     if not try_html or prefix is None:
@@ -375,11 +400,11 @@ def check_dirlisting(package, url, prefix, try_html=True):
     tarballs = []
     for entry in RE_TARBALL_GROUP(prefix).findall(str(soup)):
         tarballs.append(Tarball(entry, fetch_time, None))
-    ver, tbl = tarball_maxver(tarballs, prefix)
+    ver, tbl = tarball_maxver(tarballs, prefix, origversion)
     if ver:
         return Release(package, 'html', ver, tbl.updated, url)
 
-def check_ftp(package, url, prefix):
+def check_ftp(package, origversion, url, prefix):
     urlp = urllib.parse.urlparse(url)
     fetch_time = int(time.time())
     with ftputil.FTPHost(urlp.hostname, urlp.username or 'anonymous', urlp.password) as host:
@@ -390,7 +415,7 @@ def check_ftp(package, url, prefix):
         tarballs = []
         for x in host.listdir(urlp.path):
             tarballs.append(Tarball(x, st_mtime, None))
-        ver, tbl = tarball_maxver(tarballs, prefix)
+        ver, tbl = tarball_maxver(tarballs, prefix, origversion)
         if not ver:
             return None
         return Release(package, 'ftp', ver, tbl.updated, url)
@@ -559,7 +584,7 @@ def check_auto(name, srctype, srcurl, version):
     upstream = detect_upstream(name, srctype, srcurl, version)
     if upstream is None:
         return
-    return UPSTRAM_TYPES[upstream[0]](name, *upstream[1:])
+    return UPSTRAM_TYPES[upstream[0]](name, version, *upstream[1:])
 
 def check_updates(abbsdbfile, dbfile):
     abbsdb = sqlite3.connect(abbsdbfile)
@@ -586,7 +611,7 @@ def check_updates(abbsdbfile, dbfile):
             logging.warning("%s: can't detect upstream" % name)
             continue
         try:
-            release = UPSTRAM_TYPES[upstream[0]](name, *upstream[1:])
+            release = UPSTRAM_TYPES[upstream[0]](name, version, *upstream[1:])
             err = None if release else 'not found'
         except Exception as ex:
             err = type(ex).__name__ + ': ' + str(ex)
@@ -612,6 +637,11 @@ def main(argv):
 
     logging.info('Checking updates...')
     check_updates(args.abbsdb, args.db)
+    logging.info('Checking anitya updates...')
+    try:
+        anitya.update_db(args.db, args.abbsdb)
+    except Exception:
+        logging.exception('Anitya update failed.')
     logging.info('Done.')
     return 0
 

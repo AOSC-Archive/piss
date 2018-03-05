@@ -6,8 +6,6 @@ import re
 import json
 import sqlite3
 import argparse
-import collections
-import configparser
 
 import requests
 

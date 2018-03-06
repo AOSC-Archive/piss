@@ -42,7 +42,7 @@ RE_PYPISRC = re.compile(r'^https?://pypi\.(python\.org|io)/packages/source/')
 RE_VER_PREFIX = re.compile(r'^(?:version|ver|v|releases|release|rel|r)[._/-]?', re.I)
 RE_TARBALL = re.compile(r'^(.+?)[._-][vr]?(\d.*?)(?:[._-](?:orig|src|source))?(\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip|\.gem)$', re.I)
 RE_TARBALL_GROUP = lambda s: re.compile(r'\b(' + (re.escape(s) if s else '(.+?)') + r'[._-][vr]?(?:\d.*?)(?:[._-](?:orig|src|source))?(?:\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip))\b', re.I)
-RE_BINARY = re.compile('[._+-](linux32|linux64|windows|win32|win64|w32|w64|mingw|msvc|mac|osx|x86|i.86|x64|amd64|arm64|armhf|armel|mips|ppc|powerpc|s390x|portable|dbgsym)', re.I)
+RE_BINARY = re.compile('[._+-](linux32|linux64|windows|win32|win64|win\b|w32|w64|mingw|msvc|mac|osx|darwin|ios|x86|i.86|x64|amd64|arm64|armhf|armel|mips|ppc|powerpc|s390x|portable|dbgsym)', re.I)
 RE_VER_MINOR = re.compile(r'\d+\.\d+$')
 RE_CGIT_TAGS = re.compile(r'/tag/\?h=|refs/tags/')
 

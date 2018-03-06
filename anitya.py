@@ -53,7 +53,7 @@ def check_update(cur):
 def detect_links(cur, abbsdbfile):
     projects = cur.execute(
         'SELECT min(id) id, name FROM anitya_projects'
-        ' GROUP BY name ORDER BY id').fetchall()
+        ' GROUP BY name ORDER BY ecosystem_name, id').fetchall()
     project_index = {}
     for row in projects:
         name_index = re_projectrep.sub('', row[1].lower())

@@ -13,6 +13,19 @@ API_ENDPOINT = os.environ.get('API_ENDPOINT', 'https://release-monitoring.org/ap
 
 re_projectrep = re.compile(r'^[^/]+/|[. _-]')
 
+ecosystems = {
+    "pypi": "PyPI",
+    "npmjs": "npm",
+    "Rubygems": "rubygems",
+    "Maven Central": "maven",
+    "PyPI": "PyPI",
+    "crates.io": "crates.io",
+}
+
+cmp = lambda a, b: ((a > b) - (a < b))
+
+backend_cmp = lambda a, b: cmp(ecosystems.get(a, ''), ecosystems.get(b, ''))
+
 def anitya_api(method, **params):
     req = requests.get(API_ENDPOINT + method, params=params, timeout=300)
     req.raise_for_status()
@@ -52,8 +65,11 @@ def check_update(cur):
 
 def detect_links(cur, abbsdbfile):
     projects = cur.execute(
-        'SELECT min(id) id, name FROM anitya_projects'
-        ' GROUP BY name ORDER BY ecosystem_name, id').fetchall()
+        'SELECT id, name FROM anitya_projects ap '
+        'INNER JOIN ( '
+        '  SELECT name, min(backend COLLATE backend_cmp) backend '
+        '  FROM anitya_projects GROUP BY name '
+        ') t1 USING (name, backend) ORDER BY id').fetchall()
     project_index = {}
     for row in projects:
         name_index = re_projectrep.sub('', row[1].lower())
@@ -71,6 +87,7 @@ def detect_links(cur, abbsdbfile):
 
 def update_db(database, abbsdbfile, reset=False):
     db = sqlite3.connect(database)
+    db.create_collation("backend_cmp", backend_cmp)
     cur = db.cursor()
     if reset:
         cur.execute('DROP TABLE IF EXISTS anitya_projects')

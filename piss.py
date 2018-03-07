@@ -645,6 +645,22 @@ def check_updates(abbsdbfile, dbfile):
         gc.collect()
     cur.execute('PRAGMA optimize')
 
+SQL_VIEW_PISS_VERSION = '''
+CREATE VIEW IF NOT EXISTS v_package_upstream AS
+SELECT
+  package, coalesce(pu.version, ap.latest_version) version,
+  coalesce(pu.time, ap.updated_on) updated,
+  coalesce(pu.url, ('https://release-monitoring.org/project/' || ap.id || '/')) url
+FROM (
+  SELECT package FROM package_upstream
+  UNION
+  SELECT package FROM anitya_link
+) p
+LEFT JOIN package_upstream pu USING (package)
+LEFT JOIN anitya_link al USING (package)
+LEFT JOIN anitya_projects ap ON al.projectid=ap.id
+'''
+
 def main(argv):
     parser = argparse.ArgumentParser(description='Projects Information Storage System')
     parser.add_argument('abbsdb', help='abbs-meta database file')
@@ -658,6 +674,10 @@ def main(argv):
         anitya.update_db(args.db, args.abbsdb)
     except Exception:
         logging.exception('Anitya update failed.')
+    db = sqlite3.connect(args.db)
+    db.execute(SQL_VIEW_PISS_VERSION)
+    db.execute('VACUUM')
+    db.commit()
     logging.info('Done.')
     return 0
 

@@ -609,7 +609,8 @@ def check_updates(abbsdbfile, dbfile):
     now = int(time.time())
     delayed = set(x[0] for x in cur.execute(
         "SELECT package FROM upstream_status "
-        "WHERE (last_try + 86400*3 > ? AND (err='not found' OR err LIKE 'HTTPError%')) "
+        "WHERE (last_try + 86400*3 > ? AND "
+        "(err='not found' OR err='upstream not found' OR err LIKE 'HTTPError%')) "
         "OR last_try + 7200 > ?", (now, now)))
     for name, srctype, srcurl, version in pkglist:
         if not srctype or name in delayed:
@@ -621,8 +622,8 @@ def check_updates(abbsdbfile, dbfile):
             cur.execute(
                 'INSERT OR IGNORE INTO upstream_status(package) VALUES (?)', (name,))
             cur.execute(
-                'UPDATE upstream_status SET last_try=? AND err=? WHERE package=?',
-                (fetch_time, "can't detect upstream", name))
+                'UPDATE upstream_status SET last_try=?, err=? WHERE package=?',
+                (fetch_time, "upstream not found", name))
             logging.warning("%s: can't detect upstream" % name)
             continue
         try:

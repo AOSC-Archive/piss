@@ -172,12 +172,14 @@ def tarball_maxver(tbllist, name=None, origversion=None):
         if not match:
             continue
         ver = match.group(2)
-        if (origversion and RE_PRERELEASE.search(ver) and
-            not RE_PRERELEASE.search(origversion)):
-            continue
         pfxmatch = (match.group(1) == name)
         vermatch = bool(re_verfmt.match(ver))
         tblversions[(pfxmatch, vermatch, ver)] = t
+    if origversion and not RE_PRERELEASE.search(origversion):
+        tblver_wodev = {k:v for k,v in tblversions.items()
+                        if not RE_PRERELEASE.search(k[-1])}
+        if tblver_wodev:
+            tblversions = tblver_wodev
     if not tblversions:
         return None, None
     pfxmatch, vermatch, ver = max(
@@ -194,10 +196,12 @@ def tag_maxver(taglist, prefix=None, origversion=None):
         ver = RE_VER_PREFIX.sub('', ver)
         if not RE_VERSION.match(ver):
             continue
-        if (origversion and RE_PRERELEASE.search(ver) and
-            not RE_PRERELEASE.search(origversion)):
-            continue
         versions[(bool(re_verfmt.match(ver)), ver)] = tag
+    if origversion and not RE_PRERELEASE.search(origversion):
+        tagver_wodev = {k:v for k,v in versions.items()
+                        if not RE_PRERELEASE.search(k[-1])}
+        if tagver_wodev:
+            versions = tagver_wodev
     if not versions:
         return None, None
     vermatch, ver = max(versions.keys(), key=lambda x: (x[0], version_compare_key(x[1])))

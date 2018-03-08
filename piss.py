@@ -41,6 +41,7 @@ RE_PYPI = re.compile(r'^https?://pypi\.(python\.org|io)')
 RE_PYPISRC = re.compile(r'^https?://pypi\.(python\.org|io)/packages/source/')
 RE_VER_PREFIX = re.compile(r'^(?:version|ver|v|releases|release|rel|r)[._/-]?', re.I)
 RE_TARBALL = re.compile(r'^(.+?)[._-][vr]?(\d.*?)(?:[._-](?:orig|src|source))?(\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip|\.gem)$', re.I)
+RE_TARBALL_PREFIX = lambda s: re.compile(r'^' + ('(%s)' % re.escape(s) if s else '(.+?)') +'[._-]?[vr]?(\d.*?)(?:[._-](?:orig|src|source))?(\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip|\.gem)$', re.I)
 RE_TARBALL_GROUP = lambda s: re.compile(r'\b(' + (re.escape(s) if s else '(.+?)') + r'[._-][vr]?(?:\d.*?)(?:[._-](?:orig|src|source))?(?:\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip))\b', re.I)
 RE_BINARY = re.compile('[._+-](linux32|linux64|windows|win32|win64|win\b|w32|w64|mingw|msvc|mac|osx|darwin|ios|x86|i.86|x64|amd64|arm64|armhf|armel|mips|ppc|powerpc|s390x|portable|dbgsym)', re.I)
 RE_VER_MINOR = re.compile(r'\d+\.\d+$')
@@ -48,6 +49,7 @@ RE_CGIT_TAGS = re.compile(r'/tag/\?h=|refs/tags/')
 
 RE_ALPHAPREFIX = re.compile("^[A-Za-z_.-]{5,}")
 RE_VERSION = re.compile(r"\d+\.\d+|\d{3,}")
+RE_PRERELEASE = re.compile('alpha|beta|pre|rc|dev|trunk|999', re.I)
 
 COMMON_EXT = frozenset(('.gz', '.bz2', '.xz', '.tar', '.7z', '.rar', '.zip', '.tgz', '.tbz', '.txz'))
 CGIT_SITES = frozenset((
@@ -166,10 +168,13 @@ def tarball_maxver(tbllist, name=None, origversion=None):
             continue
         if RE_BINARY.search(t.filename):
             continue
-        match = RE_TARBALL.match(t.filename)
+        match = RE_TARBALL_PREFIX(lname).match(t.filename)
         if not match:
             continue
         ver = match.group(2)
+        if (origversion and RE_PRERELEASE.search(ver) and
+            not RE_PRERELEASE.search(origversion)):
+            continue
         pfxmatch = (match.group(1) == name)
         vermatch = bool(re_verfmt.match(ver))
         tblversions[(pfxmatch, vermatch, ver)] = t
@@ -188,6 +193,9 @@ def tag_maxver(taglist, prefix=None, origversion=None):
                          tag.name, flags=re.I)
         ver = RE_VER_PREFIX.sub('', ver)
         if not RE_VERSION.match(ver):
+            continue
+        if (origversion and RE_PRERELEASE.search(ver) and
+            not RE_PRERELEASE.search(origversion)):
             continue
         versions[(bool(re_verfmt.match(ver)), ver)] = tag
     if not versions:
@@ -522,7 +530,10 @@ def detect_upstream(name, srctype, url, version=None):
             if filename:
                 match = RE_TARBALL.match(filename)
                 if match:
-                    prefix = match.group(1)
+                    if filename.startswith(name):
+                        prefix = name
+                    else:
+                        prefix = match.group(1)
             if urlp.hostname == 'sourceforge.net':
                 path = newurlp[2].strip('/').split('/')
                 if path[0] == 'projects':

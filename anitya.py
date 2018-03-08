@@ -10,6 +10,7 @@ import argparse
 import requests
 
 API_ENDPOINT = os.environ.get('API_ENDPOINT', 'https://release-monitoring.org/api/')
+RE_VER_PREFIX = re.compile(r'^(?:version|ver|v|releases|release|rel|r)[._/-]?', re.I)
 
 re_projectrep = re.compile(r'^[^/]+/|[. _-]')
 
@@ -57,9 +58,10 @@ def check_update(cur):
         raise ValueError('anitya API version not supported')
     projects = anitya_api('projects')
     for project in projects['projects']:
+        ver = RE_VER_PREFIX.sub('', project['version'])
         cur.execute('REPLACE INTO anitya_projects VALUES (?,?,?,?,?,?,?,?,?)', (
             project['id'], project['name'], project['homepage'], project['backend'],
-            project['version_url'], project['regex'], project['version'],
+            project['version_url'], project['regex'], ver,
             int(project['updated_on']), int(project['created_on'])
         ))
 

@@ -58,7 +58,10 @@ def check_update(cur):
         raise ValueError('anitya API version not supported')
     projects = anitya_api('projects')
     for project in projects['projects']:
-        ver = RE_VER_PREFIX.sub('', project['version'])
+        if project['version']:
+            ver = RE_VER_PREFIX.sub('', project['version'])
+        else:
+            ver = None
         cur.execute('REPLACE INTO anitya_projects VALUES (?,?,?,?,?,?,?,?,?)', (
             project['id'], project['name'], project['homepage'], project['backend'],
             project['version_url'], project['regex'], ver,

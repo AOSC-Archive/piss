@@ -59,7 +59,9 @@ def check_update(cur):
     projects = anitya_api('projects')
     for project in projects['projects']:
         if project['version']:
-            ver = RE_VER_PREFIX.sub('', project['version'])
+            ver = re.sub('^' + re.escape(project['name']) + '[._-]', '',
+                         project['version'], flags=re.I)
+            ver = RE_VER_PREFIX.sub('', ver)
         else:
             ver = None
         cur.execute('REPLACE INTO anitya_projects VALUES (?,?,?,?,?,?,?,?,?)', (

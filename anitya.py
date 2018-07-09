@@ -11,6 +11,7 @@ import requests
 
 API_ENDPOINT = os.environ.get('API_ENDPOINT', 'https://release-monitoring.org/api/')
 RE_VER_PREFIX = re.compile(r'^(?:version|ver|v|releases|release|rel|r)[._/-]?', re.I)
+RE_VERSION_UNDERLINE = re.compile(r"(\d+)_(\d+)")
 
 re_projectrep = re.compile(r'^[^/]+/|[. _-]')
 
@@ -26,6 +27,13 @@ ecosystems = {
 cmp = lambda a, b: ((a > b) - (a < b))
 
 backend_cmp = lambda a, b: cmp(ecosystems.get(a, ''), ecosystems.get(b, ''))
+
+def version_underline_norm(version):
+    if not RE_VERSION_UNDERLINE.match(version):
+        return version
+    while RE_VERSION_UNDERLINE.search(version):
+        version = RE_VERSION_UNDERLINE.sub(r'\1.\2', version)
+    return version
 
 def anitya_api(method, **params):
     req = requests.get(API_ENDPOINT + method, params=params, timeout=300)
@@ -61,7 +69,7 @@ def check_update(cur):
         if project['version']:
             ver = re.sub('^' + re.escape(project['name']) + '[._-]', '',
                          project['version'], flags=re.I)
-            ver = RE_VER_PREFIX.sub('', ver)
+            ver = version_underline_norm(RE_VER_PREFIX.sub('', ver))
         else:
             ver = None
         cur.execute('REPLACE INTO anitya_projects VALUES (?,?,?,?,?,?,?,?,?)', (

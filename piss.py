@@ -154,7 +154,7 @@ def version_format(version):
             pass
         elif s.isdigit():
             if len(s) < 3:
-                ret.append(r'\d+')
+                ret.append(r'\d{1,3}')
             else:
                 ret.append(r'\d{3,}')
         elif s.isalpha():

@@ -9,7 +9,7 @@ import argparse
 
 import requests
 
-API_ENDPOINT = os.environ.get('API_ENDPOINT', 'https://release-monitoring.org/api/')
+API_ENDPOINT = os.environ.get('API_ENDPOINT', 'https://release-monitoring.org/api/v2/')
 RE_VER_PREFIX = re.compile(r'^(?:version|ver|v|releases|release|rel|r)[._/-]?', re.I)
 RE_VERSION_UNDERLINE = re.compile(r"(\d+)_(\d+)")
 
@@ -40,11 +40,19 @@ def anitya_api(method, **params):
     req.raise_for_status()
     return json.loads(req.content.decode('utf-8'))
 
-def init_db(cur):
+def init_db(db):
+    cur = db.cursor()
+    updated = cur.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type='table' AND tbl_name='anitya_projects' "
+        "AND sql LIKE '%ecosystem%'").fetchone()
+    if not updated:
+        cur.execute('DROP TABLE IF EXISTS anitya_projects')
     cur.execute('CREATE TABLE IF NOT EXISTS anitya_projects ('
                 'id INTEGER PRIMARY KEY,'
                 'name TEXT,'
                 'homepage TEXT,'
+                'ecosystem TEXT,'
                 'backend TEXT,'
                 'version_url TEXT,'
                 'regex TEXT,'
@@ -60,25 +68,38 @@ def init_db(cur):
                 ' ON anitya_projects (name)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_anitya_link'
                 ' ON anitya_link (projectid)')
+    db.commit()
 
-def check_update(cur):
-    if not anitya_api('version')['version'].startswith('1.'):
-        raise ValueError('anitya API version not supported')
-    projects = anitya_api('projects')
-    for project in projects['projects']:
-        if project['version']:
-            ver = re.sub('^' + re.escape(project['name']) + '[._-]', '',
-                         project['version'], flags=re.I)
-            ver = version_underline_norm(RE_VER_PREFIX.sub('', ver))
-        else:
-            ver = None
-        cur.execute('REPLACE INTO anitya_projects VALUES (?,?,?,?,?,?,?,?,?)', (
-            project['id'], project['name'], project['homepage'], project['backend'],
-            project['version_url'], project['regex'], ver,
-            int(project['updated_on']), int(project['created_on'])
-        ))
+def check_update(db):
+    #if not anitya_api('version')['version'].startswith('1.'):
+        #raise ValueError('anitya API version not supported')
+    total_items = 1
+    got_items = 0
+    page = 1
+    cur = db.cursor()
+    while got_items < total_items:
+        projects = anitya_api('projects', page=page, items_per_page=250)
+        total_items = projects['total_items']
+        print(projects)
+        for project in projects['items']:
+            got_items += 1
+            if project['version']:
+                ver = re.sub('^' + re.escape(project['name']) + '[._-]', '',
+                             project['version'], flags=re.I)
+                ver = version_underline_norm(RE_VER_PREFIX.sub('', ver))
+            else:
+                ver = None
+            cur.execute('REPLACE INTO anitya_projects VALUES (?,?,?,?,?,?,?,?,?,?)', (
+                project['id'], project['name'], project['homepage'],
+                project['ecosystem'], project['backend'],
+                project['version_url'], project['regex'], ver,
+                int(project['updated_on']), int(project['created_on'])
+            ))
+        page += 1
+        db.commit()
 
-def detect_links(cur, abbsdbfile):
+def detect_links(db, abbsdbfile):
+    cur = db.cursor()
     projects = cur.execute(
         'SELECT id, name FROM anitya_projects ap '
         'INNER JOIN ( '
@@ -99,6 +120,7 @@ def detect_links(cur, abbsdbfile):
             links[name] = project_index[name_index]
     for k, v in links.items():
         cur.execute('REPLACE INTO anitya_link VALUES (?,?)', (k, v[0]))
+    db.commit()
 
 def update_db(database, abbsdbfile, reset=False):
     db = sqlite3.connect(database)
@@ -107,11 +129,11 @@ def update_db(database, abbsdbfile, reset=False):
     if reset:
         cur.execute('DROP TABLE IF EXISTS anitya_projects')
         cur.execute('DROP TABLE IF EXISTS anitya_link')
-        cur.execute('VACUUM')
-    init_db(cur)
-    check_update(cur)
-    detect_links(cur, abbsdbfile)
+    init_db(db)
+    check_update(db)
+    detect_links(db, abbsdbfile)
     cur.execute('PRAGMA optimize')
+    cur.execute('VACUUM')
     db.commit()
 
 def main():

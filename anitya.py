@@ -76,11 +76,15 @@ def check_update(db):
     total_items = 1
     got_items = 0
     page = 1
+    retrys = 0
     cur = db.cursor()
-    while got_items < total_items:
-        projects = anitya_api('projects', page=page, items_per_page=250)
+    while got_items < total_items and retrys < 5:
+        try:
+            projects = anitya_api('projects', page=page, items_per_page=250)
+        except Exception:
+            retrys += 1
+            continue
         total_items = projects['total_items']
-        print(projects)
         for project in projects['items']:
             got_items += 1
             if project['version']:

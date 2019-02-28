@@ -190,9 +190,12 @@ def tarball_compress_key(tbl):
 def tarball_maxver(tbllist, name=None, origversion=None):
     lname = name and name.lower()
     re_verfmt = version_format(origversion)
+    re_dirfmt = re.compile(re_verfmt.pattern + '/$')
     tblversions = {}
     for t in tbllist:
         if not (lname and t.filename.lower().startswith(lname)):
+            if re_dirfmt.match(t.filename):
+                tblversions[(False, True, t.filename[:-1])] = t
             continue
         if RE_BINARY.search(t.filename):
             continue

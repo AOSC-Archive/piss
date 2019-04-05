@@ -168,8 +168,6 @@ def version_underline_norm(version):
         version = RE_VERSION_UNDERLINE.sub(r'\1.\2', version)
     return version
 
-RE_TARBALL = re.compile(r'^(.+?)[._-][vr]?(\d.*?)(?:[._-](?:orig|src|source))?(\.tar\.xz|\.tar\.bz2|\.tar\.gz|\.t.z|\.zip|\.gem)$', re.I)
-
 def tarball_compress_key(tbl):
     pref = {
         '.tar.xz': 10,
@@ -522,6 +520,14 @@ def check_ftp(package, origversion, url, prefix):
         tarball = urllib.parse.urljoin(url, tbl.filename)
         return Release(package, 'ftp', ver, tbl.updated, url, tarball)
 
+def select_prefix(name, filename, match):
+    if not RE_ALPHA.search(match):
+        return None
+    if filename.startswith(name):
+        return name
+    else:
+        return match
+
 def detect_upstream(name, srctype, url, version=None):
     urlp = urllib.parse.urlparse(url)
     if urlp.netloc == 'github.com':
@@ -539,11 +545,9 @@ def detect_upstream(name, srctype, url, version=None):
         repo = '/'.join(pathseg[:2])
         if repo.endswith('.git'):
             repo = repo[:-4]
-        match = RE_TARBALL.match(urlp.path.split('/')[-1])
-        if match:
-            prefix = match.group(1)
-        else:
-            prefix = None
+        filename = urlp.path.split('/')[-1]
+        match = RE_TARBALL.match(filename)
+        prefix = select_prefix(name, filename, match.group(1))
         if len(pathseg) > 2:
             if pathseg[2] == 'downloads':
                 return 'bitbucket', repo, 'downloads', prefix
@@ -577,7 +581,8 @@ def detect_upstream(name, srctype, url, version=None):
         fnmatch = RE_TARBALL.match(filename)
         if fnmatch is None:
             return
-        return 'ftp', newurl, fnmatch.group(1)
+        prefix = select_prefix(name, filename, fnmatch.group(1))
+        return 'ftp', newurl, prefix
     elif ('cgit' in url or (srctype == 'GITSRC' or 'git' in url)
           and (urlp.netloc in CGIT_SITES or '/snapshot/' in urlp.path)):
         newurlp = list(urlp)
@@ -609,10 +614,7 @@ def detect_upstream(name, srctype, url, version=None):
             if filename:
                 match = RE_TARBALL.match(filename)
                 if match:
-                    if filename.startswith(name):
-                        prefix = name
-                    else:
-                        prefix = match.group(1)
+                    prefix = select_prefix(name, filename, match.group(1))
             if urlp.hostname == 'sourceforge.net':
                 path = newurlp[2].strip('/').split('/')
                 if path[0] == 'projects':

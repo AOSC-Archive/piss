@@ -716,6 +716,7 @@ def check_updates(abbsdbfile, dbfile):
                 'UPDATE upstream_status SET last_try=?, err=? WHERE package=?',
                 (fetch_time, "upstream not found", name))
             logging.warning("%s: can't detect upstream" % name)
+            db.commit()
             continue
         try:
             release = UPSTRAM_TYPES[upstream[0]](name, version, *upstream[1:])

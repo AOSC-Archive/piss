@@ -547,6 +547,8 @@ def detect_upstream(name, srctype, url, version=None):
             repo = repo[:-4]
         filename = urlp.path.split('/')[-1]
         match = RE_TARBALL.match(filename)
+        if match is None:
+            return
         prefix = select_prefix(name, filename, match.group(1))
         if len(pathseg) > 2:
             if pathseg[2] == 'downloads':

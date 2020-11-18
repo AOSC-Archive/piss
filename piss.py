@@ -32,10 +32,10 @@ logging.captureWarnings(True)
 
 USER_AGENT = 'Mozilla/5.0 (compatible; PISS/%s; +https://github.com/AOSC-Dev/piss)' % __version__
 
-RE_ALL_DIGITS_OR_NOT = re.compile("\d+|\D+")
-RE_DIGITS = re.compile("\d+")
+RE_ALL_DIGITS_OR_NOT = re.compile(r"\d+|\D+")
+RE_DIGITS = re.compile(r"\d+")
 RE_ALPHA = re.compile("[A-Za-z]")
-RE_CHARCLASS = re.compile("([A-Za-z]+|\d+|[._+~-]+)")
+RE_CHARCLASS = re.compile(r"([A-Za-z]+|\d+|[._+~-]+)")
 RE_SRCHOST = re.compile(r'^https://(github\.com|bitbucket\.org|gitlab\.com)')
 RE_PYPI = re.compile(r'^https?://pypi\.(python\.org|io)')
 RE_PYPISRC = re.compile(r'^https?://pypi\.(python\.org|io)/packages/source/')
